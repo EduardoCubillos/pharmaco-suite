@@ -115,8 +115,9 @@ Genera moléculas candidatas nuevas a partir de ligandos activos conocidos, usan
 ```bash
 cd denovo_cli
 
-# Pipeline completo desde ChEMBL
-python denovo.py run --target "HIV protease" --n 20 --outdir resultados/
+# Pipeline completo desde ChEMBL (usar ChEMBL ID del target)
+# Buscar el ID en https://www.ebi.ac.uk/chembl/ → Target → copiar CHEMBL ID
+python denovo.py run --target "CHEMBL247" --n 20 --outdir resultados/
 
 # Pipeline desde archivo propio de ligandos
 python denovo.py run --file mis_ligandos.smi --n 20 --outdir resultados/
@@ -128,8 +129,8 @@ python denovo.py run \
   --pharmacophore ../pharmacophore_cli/resultados/pharmacophore_lbp.pdb \
   --outdir resultados/
 
-# Solo descargar ligandos activos desde ChEMBL
-python denovo.py fetch --target "HIV protease" --n 50 --out ligands.smi
+# Solo descargar ligandos activos desde ChEMBL (usar ID, no nombre libre)
+python denovo.py fetch --target "CHEMBL247" --n 50 --out ligands.smi
 
 # Filtrar ADMET de un SDF existente
 python denovo.py filter --sdf moleculas.sdf --outdir filtradas/
@@ -170,7 +171,7 @@ Top N candidatas → SDF 3D + PDBQT (si Meeko instalado) + CSV métricas
 
 | Argumento | Default | Descripción |
 |---|---|---|
-| `--target` | — | Nombre del target en ChEMBL (ej. "HIV protease") |
+| `--target` | — | ChEMBL ID del target (ej. "CHEMBL247"). Buscar en ebi.ac.uk/chembl → Target |
 | `--file` | — | Archivo local de ligandos (.smi, .sdf, .csv) |
 | `--n` | 20 | Número de moléculas a generar |
 | `--n-ligands` | 50 | Ligandos de entrenamiento a usar |

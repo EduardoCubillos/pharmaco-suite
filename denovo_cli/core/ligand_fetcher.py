@@ -177,7 +177,7 @@ def _resolve_target_id(query: str, verbose: bool) -> Optional[str]:
 
     # Buscar por nombre
     url = f"{CHEMBL_BASE}/target/search.json"
-    params = {"q": query, "limit": 5}
+    params = {"q": query, "limit": 10}
     try:
         r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
@@ -185,15 +185,30 @@ def _resolve_target_id(query: str, verbose: bool) -> Optional[str]:
         if not targets:
             return None
 
-        # Preferir SINGLE PROTEIN sobre otros tipos
+        query_lower = query.lower()
+
+        # 1. Coincidencia exacta de nombre (case-insensitive)
         for t in targets:
-            if t.get("target_type") == "SINGLE PROTEIN":
+            if t.get("pref_name", "").lower() == query_lower:
+                _log(f"[ChEMBL] Coincidencia exacta: {t['pref_name']} ({t['target_chembl_id']})")
+                return t["target_chembl_id"]
+
+        # 2. Nombre contiene la query y es SINGLE PROTEIN
+        for t in targets:
+            name = t.get("pref_name", "").lower()
+            if query_lower in name and t.get("target_type") == "SINGLE PROTEIN":
                 _log(f"[ChEMBL] Encontrado: {t['pref_name']} ({t['target_chembl_id']})")
                 return t["target_chembl_id"]
 
-        # Fallback: primer resultado
+        # 3. Cualquier SINGLE PROTEIN
+        for t in targets:
+            if t.get("target_type") == "SINGLE PROTEIN":
+                _log(f"[ChEMBL] Usando (SINGLE PROTEIN): {t['pref_name']} ({t['target_chembl_id']})")
+                return t["target_chembl_id"]
+
+        # 4. Fallback: primer resultado
         t = targets[0]
-        _log(f"[ChEMBL] Usando: {t['pref_name']} ({t['target_chembl_id']})")
+        _log(f"[ChEMBL] Usando (primer resultado): {t['pref_name']} ({t['target_chembl_id']})")
         return t["target_chembl_id"]
 
     except Exception as e:
