@@ -15,6 +15,10 @@ venv/
 .venv/
 .conda/
 
+# Tests y resultados locales
+tmp/
+test_suite.sh
+
 # Resultados y archivos temporales
 *.pdb
 *.sdf
