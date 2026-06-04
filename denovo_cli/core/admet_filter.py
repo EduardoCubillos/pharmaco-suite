@@ -117,11 +117,14 @@ def filter_molecules(
         canon = Chem.MolToSmiles(mol)
         admet = compute_admet(mol)
         admet["smiles"] = canon
-        admet["passes"] = _passes_filters(admet, active_filters)
+        try:
+            admet["passes"] = _passes_filters(admet, active_filters)
+        except Exception:
+            admet["passes"] = False
         results.append(admet)
 
-    passing  = [r for r in results if r["passes"]]
-    failing  = [r for r in results if not r["passes"]]
+    passing  = [r for r in results if r.get("passes")]
+    failing  = [r for r in results if not r.get("passes")]
     passing.sort(key=lambda x: -x["qed"])
 
     _log(f"[ADMET] Evaluadas: {len(results)} | Pasan: {len(passing)} | "
@@ -138,7 +141,7 @@ def admet_summary_table(results: List[Dict]) -> str:
     for i, r in enumerate(results[:25], 1):
         smi_short = r["smiles"][:38] + ".." if len(r["smiles"]) > 40 else r["smiles"]
         sa_str    = f"{r['sa_score']:.1f}" if r.get("sa_score") else "  ?"
-        ok_str    = "✓" if r["passes"] else "✗"
+        ok_str    = "✓" if r.get("passes") else "✗"
         lines.append(
             f"{i:>4}  {smi_short:40s}  {r['mw']:>6.1f}  {r['logp']:>5.2f}  "
             f"{r['psa']:>5.1f}  {r['qed']:>5.3f}  {sa_str:>4}  "

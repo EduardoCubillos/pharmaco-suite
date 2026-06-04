@@ -86,12 +86,12 @@ def generate_molecules(
                 return 0.0
             ps  = pharmacophore_score(mol, reference_profile)
             qed = admet.get("qed", 0.0)
-        # Penalizar si es idéntica a algún seed (Tanimoto > 0.95)
-        if fp_seeds:
-            fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, 2048)
-            max_sim = max(DataStructs.TanimotoSimilarity(fp, fp_s) for fp_s in fp_seeds)
-            if max_sim > 0.95:
-                return 0.0
+            # Penalizar si es idéntica a algún seed (Tanimoto > 0.95)
+            if fp_seeds:
+                fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, 2048)
+                max_sim = max(DataStructs.TanimotoSimilarity(fp, fp_s) for fp_s in fp_seeds)
+                if max_sim > 0.95:
+                    return 0.0
             sa_term = (1.0 - min(1.0, admet["sa_score"] / 5.0)) if admet.get("sa_score") else 0.5
             return 0.45 * ps + 0.35 * qed + 0.20 * sa_term
         except Exception:
