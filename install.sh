@@ -18,7 +18,7 @@ else
 fi
 
 echo "[2/3] Instalando dependencias Python..."
-pip install selfies biopython requests numpy pandas py3Dmol lxml
+pip install selfies biopython requests numpy pandas py3Dmol lxml scipy meeko
 
 echo "[3/3] Intentando instalar PLIP (opcional, para SBP mejorado)..."
 pip install plip --no-deps || echo "  PLIP no instalado — se usará fallback BioPython para SBP"

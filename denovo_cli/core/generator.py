@@ -216,6 +216,7 @@ def generate_molecules(
             "smiles"       : smi,
             "pharma_score" : round(ps, 3),
             "score"        : round(sc, 3),
+            "passes"       : True,   # ya filtrado por ADMET arriba
             **{k: v for k, v in admet.items() if k not in ("passes", "error", "alerts")},
         })
 
