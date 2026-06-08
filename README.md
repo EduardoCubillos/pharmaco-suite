@@ -111,16 +111,23 @@ El consenso **no es una superposición** de los tres modelos. Es un proceso de v
 |------|----------|-------------|---------------------|
 | ★★★ (3) | Triple consenso | SBP + LBP + RBP coinciden | grande, muy opaca |
 | ★★☆ (2) | Doble consenso | 2 de los 3 modelos coinciden | mediana, semiopaca |
-| ★☆☆ (1) | Único modelo | Solo 1 modelo — **descartado por defecto** | no aparece |
+| ★☆☆ (1) | Único modelo | Solo 1 modelo — incluido por defecto | pequeña, tenue |
 
 Los features de mayor peso son los más robustos para cribado virtual (Baroni et al., 2007).
 
-```bash
-# Umbral estricto: solo triple consenso
-python pharmacophore.py all ... --min-consensus-weight 3
+**¿Por qué incluir los features de peso ★☆☆ (un solo modelo)?**
 
-# Umbral relajado: incluir features de un único modelo (diagnóstico)
-python pharmacophore.py all ... --min-consensus-weight 1
+Un feature que aparece únicamente en SBP puede ser una interacción real observada en el cristal (detectada por PLIP) que LBP no captó — ya sea porque RDKit no la modela bien desde el SMILES, o porque la posición del punto de interacción difiere ligeramente de la del grupo funcional del ligando. Descartar estos features automáticamente implicaría perder evidencia experimental válida. El peso bajo ★☆☆ comunica la menor confianza; el investigador decide qué umbral usar según el contexto.
+
+```bash
+# Default: incluir todo (★☆☆ a ★★★) — conserva posible evidencia cristalográfica
+python pharmacophore.py all ...
+
+# Cribado estricto: solo features de ≥2 modelos
+python pharmacophore.py all ... --min-consensus-weight 2
+
+# Máxima confianza: solo triple consenso
+python pharmacophore.py all ... --min-consensus-weight 3
 ```
 
 ### Grafo farmacofórico 2D

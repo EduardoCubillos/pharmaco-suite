@@ -39,13 +39,20 @@ def generate_sbp(
     _log = print if verbose else lambda *a, **k: None
 
     os.makedirs(plip_outdir, exist_ok=True)
-    plip_cmd = _find_plip()
 
     features = []
+
+    # Intento 1: PLIP via CLI (genera reportes XML + PDB protonado)
+    plip_cmd = _find_plip()
     if plip_cmd:
-        _log(f"[SBP] Ejecutando PLIP: {plip_cmd}")
+        _log(f"[SBP] Ejecutando PLIP CLI: {plip_cmd}")
         features = _run_plip(plip_cmd, pdb_file, plip_outdir, verbose)
 
+    # Intento 2: PLIP via API Python (si el CLI falla pero plip está instalado)
+    if not features:
+        features = _run_plip_api(pdb_file, plip_outdir, verbose)
+
+    # Fallback: BioPython
     if not features:
         _log("[SBP] Usando fallback BioPython (distancias atómicas)...")
         features = _fallback_biopython(pdb_file, ligand_resname, verbose)
@@ -57,7 +64,149 @@ def generate_sbp(
     return features
 
 
-# ── Localización de PLIP ──────────────────────────────────────────────────────
+# ── PLIP via API Python ───────────────────────────────────────────────────────
+
+def _run_plip_api(
+    pdb_file: str,
+    outdir: str,
+    verbose: bool,
+) -> List[Dict[str, Any]]:
+    """
+    Usa PLIP como librería Python (openbabel.pybel.Atom con .coords → (x,y,z)).
+    Requiere: pip install plip --no-build-isolation
+    """
+    try:
+        from plip.structure.preparation import PDBComplex
+    except ImportError:
+        return []
+
+    _log = print if verbose else lambda *a, **k: None
+
+    try:
+        _log("[SBP] Ejecutando PLIP (API Python)...")
+        mol = PDBComplex()
+        mol.load_pdb(pdb_file)   # sin as_string — no existe en PLIP 3.x
+        mol.analyze()
+
+        features = []
+        pdb_tag = os.path.splitext(os.path.basename(pdb_file))[0]
+
+        for site_id, ia in mol.interaction_sets.items():
+
+            # ── Archivos de reporte (trazabilidad) ───────────────────────────
+            try:
+                from plip.exchange.report import BindingSiteReport
+                import lxml.etree as ET2
+                bsr = BindingSiteReport(ia)
+                tag = str(site_id).replace(":", "_").replace(" ", "_")
+                xml_path = os.path.join(outdir, f"{pdb_tag}_report.xml")
+                tree = ET2.ElementTree(bsr.xmlreport)
+                tree.write(xml_path, pretty_print=True, encoding="utf-8",
+                           xml_declaration=True)
+                _log(f"[SBP] PLIP report → {xml_path}")
+            except Exception:
+                pass  # el reporte es opcional
+
+            try:
+                prot_path = os.path.join(outdir, f"{pdb_tag}_protonated.pdb")
+                mol.protcomplex.write("pdb", prot_path, overwrite=True)
+            except Exception:
+                pass
+
+            # ── Interacciones hidrofóbicas ────────────────────────────────────
+            for hc in ia.hydrophobic_contacts:
+                try:
+                    x, y, z = hc.ligatom.coords
+                    features.append({
+                        "type"  : "HYDROPHOBIC",
+                        "coords": (float(x), float(y), float(z)),
+                        "label" : "Hidrofóbico (PLIP)",
+                    })
+                except Exception:
+                    continue
+
+            # ── Puentes de hidrógeno ──────────────────────────────────────────
+            for hb in ia.hbonds_ldon:   # ligando es donor
+                try:
+                    x, y, z = hb.d.coords
+                    features.append({
+                        "type"  : "DONOR",
+                        "coords": (float(x), float(y), float(z)),
+                        "label" : f"DONOR H-bond (PLIP) d={hb.distance_ad:.2f}Å",
+                    })
+                except Exception:
+                    continue
+
+            for hb in ia.hbonds_pdon:   # proteína es donor → ligando es acceptor
+                try:
+                    x, y, z = hb.a.coords
+                    features.append({
+                        "type"  : "ACCEPTOR",
+                        "coords": (float(x), float(y), float(z)),
+                        "label" : f"ACCEPTOR H-bond (PLIP) d={hb.distance_ad:.2f}Å",
+                    })
+                except Exception:
+                    continue
+
+            # ── π-stacking ────────────────────────────────────────────────────
+            for ps in ia.pistacking:
+                try:
+                    c = ps.ligandring.center
+                    features.append({
+                        "type"  : "HYDROPHOBIC",
+                        "coords": (float(c[0]), float(c[1]), float(c[2])),
+                        "label" : "π-stacking (PLIP)",
+                    })
+                except Exception:
+                    continue
+
+            # ── Catión-π ──────────────────────────────────────────────────────
+            for pc in ia.pication_laro:  # ligando aromático
+                try:
+                    c = pc.ring.center
+                    features.append({
+                        "type"  : "POS_IONIZABLE",
+                        "coords": (float(c[0]), float(c[1]), float(c[2])),
+                        "label" : "Catión-π ligando (PLIP)",
+                    })
+                except Exception:
+                    continue
+
+            # ── Puentes salinos ───────────────────────────────────────────────
+            for sb in ia.saltbridge_lneg:  # ligando negativo
+                try:
+                    c = sb.negative.center
+                    features.append({
+                        "type"  : "NEG_IONIZABLE",
+                        "coords": (float(c[0]), float(c[1]), float(c[2])),
+                        "label" : "Puente salino NEG (PLIP)",
+                    })
+                except Exception:
+                    continue
+
+            for sb in ia.saltbridge_pneg:  # proteína negativa → ligando positivo
+                try:
+                    c = sb.positive.center
+                    features.append({
+                        "type"  : "POS_IONIZABLE",
+                        "coords": (float(c[0]), float(c[1]), float(c[2])),
+                        "label" : "Puente salino POS (PLIP)",
+                    })
+                except Exception:
+                    continue
+
+        if features:
+            _log(f"[SBP] PLIP API: {len(features)} interacciones encontradas.")
+        return features
+
+    except Exception as e:
+        if verbose:
+            print(f"[SBP] PLIP API error: {e}")
+        import traceback; traceback.print_exc()
+        return []
+
+
+# ── Localización de PLIP (CLI) ────────────────────────────────────────────────
 
 def _find_plip() -> Optional[str]:
     """Devuelve la ruta al ejecutable o script de PLIP, o None."""
@@ -92,7 +241,10 @@ def _run_plip(
 
     if result.returncode != 0:
         if verbose:
-            print(f"[SBP] PLIP error: {result.stderr[:400]}")
+            err = (result.stderr or result.stdout or "sin output").strip()
+            print(f"[SBP] PLIP CLI error (código {result.returncode}):")
+            for line in err.splitlines()[:15]:
+                print(f"       {line}")
         return []
 
     return _parse_plip_xml(outdir, verbose)

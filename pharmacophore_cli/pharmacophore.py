@@ -668,10 +668,12 @@ def build_parser():
                        default=3.5, metavar="Å",
                        help="Radio para fusionar features entre modelos (default: 3.5 Å)")
     p_all.add_argument("--min-consensus-weight", dest="min_consensus_weight", type=int,
-                       default=2, choices=[1, 2, 3], metavar="{1,2,3}",
-                       help="Peso mínimo para incluir un feature en el consenso: "
-                            "1=cualquiera, 2=al menos 2 modelos (default), 3=solo triple. "
-                            "Usar 1 incluye features de un solo modelo (no recomendado).")
+                       default=1, choices=[1, 2, 3], metavar="{1,2,3}",
+                       help="Peso mínimo para incluir un feature en el consenso (default: 1). "
+                            "1=incluir todos (★☆☆ a ★★★): conserva interacciones de un único "
+                            "modelo que podrían ser evidencia cristalográfica real (SBP/PLIP). "
+                            "2=solo doble o triple consenso: más estricto, menos ruido. "
+                            "3=solo triple consenso: máxima confianza.")
     add_common_args(p_all)
     add_cluster_args(p_all)
 
@@ -687,8 +689,9 @@ def build_parser():
     p_cons.add_argument("--consensus-radius", dest="consensus_radius", type=float,
                         default=3.5, metavar="Å")
     p_cons.add_argument("--min-consensus-weight", dest="min_consensus_weight", type=int,
-                        default=2, choices=[1, 2, 3], metavar="{1,2,3}",
-                        help="Peso mínimo para incluir feature en consenso (default: 2)")
+                        default=1, choices=[1, 2, 3], metavar="{1,2,3}",
+                        help="Peso mínimo para incluir feature en consenso (default: 1 = todos). "
+                             "Usar 2 para cribado estricto (solo features de ≥2 modelos).")
     p_cons.add_argument("--recluster", action="store_true",
                         help="Re-clusterizar los features cargados antes del consenso")
     add_pdb_args(p_cons)   # opcional, para visualización

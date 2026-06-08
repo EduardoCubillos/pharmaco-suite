@@ -40,7 +40,7 @@ def build_consensus(
     rbp: List[Dict[str, Any]],
     radius: float = CONSENSUS_RADIUS_DEFAULT,
     verbose: bool = True,
-    min_weight: int = 2,
+    min_weight: int = 1,
 ) -> List[Dict[str, Any]]:
     """
     Construye el modelo consenso combinando SBP + LBP + RBP.
@@ -49,16 +49,24 @@ def build_consensus(
     1. Fusionar SBP y LBP (perspectiva ligando) por tipo + distancia.
     2. Para cada feature ligando, buscar en RBP el tipo complementario.
     3. Asignar peso 1/2/3 según modelos contribuyentes.
-    4. Filtrar por min_weight (default 2): solo features respaldados por
-       ≥2 modelos se incluyen en el consenso. Los descartados se reportan
-       pero no se devuelven — un feature de un único modelo no es consenso.
+    4. Filtrar por min_weight (default 1 = incluir todo).
+
+    Por qué incluir features de peso 1 (único modelo):
+    -------------------------------------------------------
+    Un feature que aparece solo en SBP puede ser una interacción real
+    observada en el cristal (vía PLIP) que LBP no detectó porque RDKit
+    no la modela bien desde el SMILES, o porque la coordenada del punto
+    de interacción difiere ligeramente de la del grupo funcional del ligando.
+    Descartarlos automáticamente significaría perder evidencia experimental.
+    El peso bajo (★☆☆) ya comunica la menor confianza; el usuario decide
+    qué usar para cribado con --min-consensus-weight.
 
     Returns
     -------
     Lista de features consenso con:
       'type'           : tipo del feature (perspectiva del ligando)
       'coords'         : centroide
-      'weight'         : min_weight … 3
+      'weight'         : 1–3 (★☆☆ / ★★☆ / ★★★)
       'models'         : set de modelos {'SBP', 'LBP', 'RBP'}
       'bfactor'        : 33.3 / 66.7 / 100.0 (para PDB)
       'rbp_complement' : descripción del feature RBP que lo respalda
@@ -135,20 +143,23 @@ def build_consensus(
     double = [f for f in consensus if f["weight"] == 2]
     single = [f for f in consensus if f["weight"] == 1]
 
-    # Filtrar por min_weight: solo features respaldados por ≥ min_weight modelos
+    # Filtrar por min_weight (default 1 = conservar todo)
     consensus_filtered = [f for f in consensus if f["weight"] >= min_weight]
     discarded = len(consensus) - len(consensus_filtered)
 
     _log(f"\n{'='*60}")
     _log("MODELO FARMACOFORO CONSENSO")
     _log(f"  Radio de clustering: {radius} Å")
-    _log(f"  Umbral mínimo     : {min_weight} modelo(s)")
     _log(f"{'='*60}")
-    _log(f"  Triple-consenso (SBP+LBP+RBP): {len(triple):3d} features")
-    _log(f"  Doble-consenso               : {len(double):3d} features")
-    _log(f"  Único modelo (descartados)   : {len(single):3d} features")
-    _log(f"  TOTAL consenso               : {len(consensus_filtered):3d} features"
-         + (f"  ({discarded} descartados por único modelo)" if discarded else ""))
+    _log(f"  ★★★ Triple-consenso (SBP+LBP+RBP): {len(triple):3d} features  ← más confiables")
+    _log(f"  ★★☆ Doble-consenso               : {len(double):3d} features")
+    _log(f"  ★☆☆ Único modelo                 : {len(single):3d} features  ← posible evidencia cristalográfica")
+    _log(f"  TOTAL                            : {len(consensus_filtered):3d} features"
+         + (f"  ({discarded} descartados por --min-consensus-weight {min_weight})" if discarded else ""))
+    if single and min_weight == 1:
+        _log(f"\n  Nota: los {len(single)} features ★☆☆ vienen de un solo modelo.")
+        _log(f"  Pueden ser interacciones reales del cristal no capturadas por LBP.")
+        _log(f"  Para cribado estricto usa: --min-consensus-weight 2")
 
     if triple:
         _log("\nFeatures triple-consenso:")

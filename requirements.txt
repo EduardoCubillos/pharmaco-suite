@@ -8,3 +8,5 @@ py3Dmol>=2.0.0
 lxml>=4.9.0
 scipy>=1.11.0
 meeko>=0.5.0
+networkx>=3.0
+matplotlib>=3.7.0
