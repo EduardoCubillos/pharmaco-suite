@@ -40,6 +40,7 @@ def build_consensus(
     rbp: List[Dict[str, Any]],
     radius: float = CONSENSUS_RADIUS_DEFAULT,
     verbose: bool = True,
+    min_weight: int = 2,
 ) -> List[Dict[str, Any]]:
     """
     Construye el modelo consenso combinando SBP + LBP + RBP.
@@ -48,13 +49,16 @@ def build_consensus(
     1. Fusionar SBP y LBP (perspectiva ligando) por tipo + distancia.
     2. Para cada feature ligando, buscar en RBP el tipo complementario.
     3. Asignar peso 1/2/3 según modelos contribuyentes.
+    4. Filtrar por min_weight (default 2): solo features respaldados por
+       ≥2 modelos se incluyen en el consenso. Los descartados se reportan
+       pero no se devuelven — un feature de un único modelo no es consenso.
 
     Returns
     -------
     Lista de features consenso con:
       'type'           : tipo del feature (perspectiva del ligando)
       'coords'         : centroide
-      'weight'         : 1, 2 o 3
+      'weight'         : min_weight … 3
       'models'         : set de modelos {'SBP', 'LBP', 'RBP'}
       'bfactor'        : 33.3 / 66.7 / 100.0 (para PDB)
       'rbp_complement' : descripción del feature RBP que lo respalda
@@ -131,14 +135,20 @@ def build_consensus(
     double = [f for f in consensus if f["weight"] == 2]
     single = [f for f in consensus if f["weight"] == 1]
 
+    # Filtrar por min_weight: solo features respaldados por ≥ min_weight modelos
+    consensus_filtered = [f for f in consensus if f["weight"] >= min_weight]
+    discarded = len(consensus) - len(consensus_filtered)
+
     _log(f"\n{'='*60}")
     _log("MODELO FARMACOFORO CONSENSO")
     _log(f"  Radio de clustering: {radius} Å")
+    _log(f"  Umbral mínimo     : {min_weight} modelo(s)")
     _log(f"{'='*60}")
     _log(f"  Triple-consenso (SBP+LBP+RBP): {len(triple):3d} features")
     _log(f"  Doble-consenso               : {len(double):3d} features")
-    _log(f"  Único modelo                 : {len(single):3d} features")
-    _log(f"  TOTAL                        : {len(consensus):3d} features")
+    _log(f"  Único modelo (descartados)   : {len(single):3d} features")
+    _log(f"  TOTAL consenso               : {len(consensus_filtered):3d} features"
+         + (f"  ({discarded} descartados por único modelo)" if discarded else ""))
 
     if triple:
         _log("\nFeatures triple-consenso:")
@@ -148,7 +158,7 @@ def build_consensus(
             _log(f"  [{i+1:02d}] {feat['type']:16s}  {feat['rbp_complement']:35s}  "
                  f"{'+'.join(sorted(feat['models']))}")
 
-    return consensus
+    return consensus_filtered
 
 
 def load_features_from_pdb(pdb_file: str, source_label: str = "LOADED") -> List[Dict[str, Any]]:

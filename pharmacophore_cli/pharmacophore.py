@@ -39,9 +39,10 @@ from core.clustering   import cluster_features, CLUSTER_RADII
 from core.sbp          import generate_sbp
 from core.lbp          import generate_lbp
 from core.rbp          import generate_rbp
-from core.consensus    import build_consensus, load_features_from_pdb
-from core.io_pdb       import write_pharmacophore_pdb
+from core.consensus     import build_consensus, load_features_from_pdb
+from core.io_pdb        import write_pharmacophore_pdb
 from core.visualization import generate_html_viewer
+from core.graph         import generate_pharmacophore_graph
 
 # ── Colores para terminal ──────────────────────────────────────────────────────
 BOLD  = "\033[1m"
@@ -327,6 +328,7 @@ def cmd_all(args):
         sbp_clustered, lbp_clustered, rbp_clustered,
         radius=args.consensus_radius,
         verbose=not args.quiet,
+        min_weight=args.min_consensus_weight,
     )
     cons_pdb = make_outname(args.outdir, "consensus", "pdb")
     write_pharmacophore_pdb(consensus, cons_pdb, title="Consenso Final",
@@ -376,6 +378,18 @@ def cmd_all(args):
         cons_html,
         ligand_resname=args.ligand,
         title="Modelo Farmacofórico Consenso Final",
+    )
+
+    # ── GRAFO FARMACOFÓRICO ───────────────────────────────────────────────────
+    if not args.quiet:
+        print(f"\n[Graph] Generando grafo farmacofórico 2D...")
+    generate_pharmacophore_graph(
+        features=consensus,
+        outdir=args.outdir,
+        prefix="pharmacophore_consensus",
+        title=f"Grafo Farmacofórico Consenso — {os.path.basename(pdb_file)}",
+        show_angles=True,
+        verbose=not args.quiet,
     )
 
     # ── RESUMEN FINAL ─────────────────────────────────────────────────────────
@@ -431,6 +445,7 @@ def cmd_consensus(args):
         sbp_feats, lbp_feats, rbp_feats,
         radius=args.consensus_radius,
         verbose=not args.quiet,
+        min_weight=args.min_consensus_weight,
     )
 
     cons_pdb  = make_outname(args.outdir, "consensus", "pdb")
@@ -457,6 +472,17 @@ def cmd_consensus(args):
             title="Consenso desde PDBs cargados",
         )
         print(f"\n{GREEN}[✓] HTML : {cons_html}{RESET}")
+
+    # Grafo farmacofórico
+    graph_paths = generate_pharmacophore_graph(
+        features=consensus,
+        outdir=args.outdir,
+        prefix="pharmacophore_consensus",
+        title="Grafo Farmacofórico Consenso",
+        verbose=not args.quiet,
+    )
+    print(f"{GREEN}[✓] PNG  : {graph_paths['png']}{RESET}")
+    print(f"{GREEN}[✓] HTML : {graph_paths['html']}{RESET}")
 
     print(f"\n{GREEN}[✓] PDB  : {cons_pdb}{RESET}")
 
@@ -641,6 +667,11 @@ def build_parser():
     p_all.add_argument("--consensus-radius", dest="consensus_radius", type=float,
                        default=3.5, metavar="Å",
                        help="Radio para fusionar features entre modelos (default: 3.5 Å)")
+    p_all.add_argument("--min-consensus-weight", dest="min_consensus_weight", type=int,
+                       default=2, choices=[1, 2, 3], metavar="{1,2,3}",
+                       help="Peso mínimo para incluir un feature en el consenso: "
+                            "1=cualquiera, 2=al menos 2 modelos (default), 3=solo triple. "
+                            "Usar 1 incluye features de un solo modelo (no recomendado).")
     add_common_args(p_all)
     add_cluster_args(p_all)
 
@@ -655,6 +686,9 @@ def build_parser():
                         help="PDB del modelo RBP")
     p_cons.add_argument("--consensus-radius", dest="consensus_radius", type=float,
                         default=3.5, metavar="Å")
+    p_cons.add_argument("--min-consensus-weight", dest="min_consensus_weight", type=int,
+                        default=2, choices=[1, 2, 3], metavar="{1,2,3}",
+                        help="Peso mínimo para incluir feature en consenso (default: 2)")
     p_cons.add_argument("--recluster", action="store_true",
                         help="Re-clusterizar los features cargados antes del consenso")
     add_pdb_args(p_cons)   # opcional, para visualización

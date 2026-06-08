@@ -95,14 +95,57 @@ Por defecto usa radios basados en literatura (Wolber & Langer, 2005):
 | POS/NEG IONIZABLE | 2.0 Å | `--radius-pos`, `--radius-neg` |
 | Global (todos) | — | `--cluster-radius` |
 
+### Modelo consenso
+
+El consenso **no es una superposición** de los tres modelos. Es un proceso de validación cruzada en tres pasos:
+
+1. **Fusión SBP + LBP:** se agrupan features del mismo tipo (DONOR, ACCEPTOR, etc.) que estén a menos de `--consensus-radius` Å entre sí. Si SBP y LBP identifican un DONOR en la misma región del espacio, se fusionan en un solo feature con peso ≥ 2.
+
+2. **Validación con RBP:** para cada feature ligando fusionado, se busca en el RBP un feature *complementario* en la misma zona (DONOR ↔ ACCEPTOR, HYDROPHOBIC ↔ HYDROPHOBIC, etc.). Si se encuentra, el peso sube a 3.
+
+3. **Filtro de calidad:** solo se incluyen features respaldados por **≥ 2 modelos** (`--min-consensus-weight 2`, por defecto). Un feature que solo aparece en un único modelo no es consenso y se descarta.
+
+#### Niveles de confianza
+
+| Peso | Etiqueta | Significado | Esfera en viewer 3D |
+|------|----------|-------------|---------------------|
+| ★★★ (3) | Triple consenso | SBP + LBP + RBP coinciden | grande, muy opaca |
+| ★★☆ (2) | Doble consenso | 2 de los 3 modelos coinciden | mediana, semiopaca |
+| ★☆☆ (1) | Único modelo | Solo 1 modelo — **descartado por defecto** | no aparece |
+
+Los features de mayor peso son los más robustos para cribado virtual (Baroni et al., 2007).
+
+```bash
+# Umbral estricto: solo triple consenso
+python pharmacophore.py all ... --min-consensus-weight 3
+
+# Umbral relajado: incluir features de un único modelo (diagnóstico)
+python pharmacophore.py all ... --min-consensus-weight 1
+```
+
+### Grafo farmacofórico 2D
+
+El subcomando `all` genera automáticamente un grafo que representa la geometría del farmacóforo consenso:
+
+- **Nodos** — features farmacofóricos, con color por tipo y tamaño proporcional al peso (★★★ > ★★☆)
+- **Aristas** — árbol de expansión mínima (MST) sobre las distancias 3D entre features; reduce N×(N−1)/2 conexiones a solo N−1, mostrando la topología esencial sin ruido visual
+- **Etiquetas** — distancias en Å sobre las 5 aristas más cortas; ángulos MST en el recuadro inferior izquierdo
+- **HTML interactivo** — permite arrastrar nodos (vis.js) y ver distancias al pasar el cursor sobre las aristas
+
 ### Archivos generados
 
 - `pharmacophore_sbp.pdb` — features SBP clusterizados
 - `pharmacophore_lbp.pdb` — features LBP clusterizados
 - `pharmacophore_rbp.pdb` — features RBP clusterizados
 - `pharmacophore_consensus.pdb` — modelo consenso (B-factor = nivel de confianza)
-- `pharmacophore_overlap.html` — visualización 3D interactiva (abrir en navegador)
-- `pharmacophore_consensus.html` — visualización del consenso
+- `pharmacophore_sbp.html` — visualización 3D interactiva SBP (abrir en navegador)
+- `pharmacophore_lbp.html` — visualización 3D interactiva LBP
+- `pharmacophore_rbp.html` — visualización 3D interactiva RBP
+- `pharmacophore_overlap.html` — superposición 3D de los tres modelos clusterizados
+- `pharmacophore_consensus.html` — visualización 3D del consenso final
+- `pharmacophore_consensus_graph.png` — grafo farmacofórico 2D (imagen estática)
+- `pharmacophore_consensus_graph.pdf` — grafo farmacofórico 2D (vectorial)
+- `pharmacophore_consensus_graph.html` — grafo farmacofórico 2D interactivo
 
 ---
 
@@ -221,7 +264,9 @@ vina --receptor 1HXW.pdbqt \
 
 ## Referencias
 
-- Wolber & Langer (2005) *J. Chem. Inf. Model.* 45, 160–169 — radios de clustering
+- Wolber & Langer (2005) *J. Chem. Inf. Model.* 45, 160–169 — radios de clustering farmacofórico
+- Baroni et al. (2007) *J. Chem. Inf. Model.* 47, 279–294 — consenso ponderado (PHASE), niveles de confianza
+- Sanders et al. (2012) *J. Chem. Inf. Model.* 52, 1261–1272 — validación de modelos consenso
 - Krenn et al. (2020) *Machine Learning: Science and Technology* 1, 045024 — SELFIES
 - Lipinski et al. (2001) *Adv. Drug Deliv. Rev.* 46, 3–26 — Rule of Five
 - Bickerton et al. (2012) *Nature Chemistry* 4, 90–98 — QED

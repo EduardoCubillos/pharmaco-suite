@@ -105,8 +105,12 @@ def generate_html_viewer(
     align-items: center;
   }}
   #viewer {{
+    width: {width}px;
+    height: {height}px;
     border: 1px solid #30363d;
     border-radius: 8px;
+    position: relative;
+    overflow: hidden;
   }}
   .controls {{
     display: flex;
@@ -202,7 +206,6 @@ let modelAdded = false;
 
 function initViewer() {{
   viewer = $3Dmol.createViewer("viewer", {{
-    width: {width}, height: {height},
     backgroundColor: "0x0d1117",
   }});
 
