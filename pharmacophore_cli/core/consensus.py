@@ -1,18 +1,17 @@
 """
-consensus.py — Modelo Farmacofórico Consenso (SBP ∩ LBP ∩ RBP).
+consensus.py — Weighted consensus pharmacophore (SBP ∩ LBP ∩ RBP).
 
-Combina los tres modelos usando complementariedad química receptor↔ligando:
-  DONOR (ligando)       ↔  ACCEPTOR (receptor)
-  ACCEPTOR (ligando)    ↔  DONOR (receptor)
-  HYDROPHOBIC           ↔  HYDROPHOBIC
-  POS_IONIZABLE         ↔  NEG_IONIZABLE
-  NEG_IONIZABLE         ↔  POS_IONIZABLE
+Combines three independent models using receptor↔ligand chemical complementarity:
+  DONOR (ligand)       ↔  ACCEPTOR (receptor)
+  ACCEPTOR (ligand)    ↔  DONOR (receptor)
+  HYDROPHOBIC          ↔  HYDROPHOBIC
+  POS_IONIZABLE        ↔  NEG_IONIZABLE
+  NEG_IONIZABLE        ↔  POS_IONIZABLE
 
-Peso del feature (1–3) según cuántos modelos lo respaldan.
-Features con peso ≥ 2 (doble o triple consenso) son los más robustos
-para cribado virtual.
+Each feature gets a weight (1–3) based on how many models agree on it.
+Features with weight ≥ 2 are the most reliable for virtual screening.
 
-Referencia:
+References:
   - Baroni et al. (2007) J. Chem. Inf. Model. 47, 279–294 (PHASE)
   - Sanders et al. (2012) J. Chem. Inf. Model. 52, 1261–1272
 """
@@ -21,7 +20,7 @@ import numpy as np
 from typing import List, Dict, Any
 from collections import defaultdict
 
-# Complementariedad química receptor ↔ ligando
+# Chemical complementarity: what a ligand feature needs from the receptor
 COMPLEMENT_OF: Dict[str, str] = {
     "DONOR"         : "ACCEPTOR",
     "ACCEPTOR"      : "DONOR",
@@ -30,8 +29,8 @@ COMPLEMENT_OF: Dict[str, str] = {
     "NEG_IONIZABLE" : "POS_IONIZABLE",
 }
 
-# Radio por defecto para fusionar features entre modelos
-CONSENSUS_RADIUS_DEFAULT = 3.5   # Å — estándar en literatura (Baroni 2007)
+# Wolber & Langer / Baroni standard for inter-model feature fusion
+CONSENSUS_RADIUS_DEFAULT = 3.5   # Å
 
 
 def build_consensus(
@@ -43,90 +42,88 @@ def build_consensus(
     min_weight: int = 1,
 ) -> List[Dict[str, Any]]:
     """
-    Construye el modelo consenso combinando SBP + LBP + RBP.
+    Build a weighted consensus from SBP, LBP, and RBP models.
 
-    Algoritmo:
-    1. Fusionar SBP y LBP (perspectiva ligando) por tipo + distancia.
-    2. Para cada feature ligando, buscar en RBP el tipo complementario.
-    3. Asignar peso 1/2/3 según modelos contribuyentes.
-    4. Filtrar por min_weight (default 1 = incluir todo).
+    Algorithm:
+    1. Pool SBP and LBP features (both describe the ligand). Merge features
+       of the same type within `radius` Å into a single centroid. Weight = 2
+       if both SBP and LBP contributed, otherwise 1.
+    2. For each ligand-perspective feature, search the RBP for a chemically
+       complementary feature within `radius` Å. If found, weight += 1.
+    3. Filter by min_weight (default 1 = keep everything).
 
-    Por qué incluir features de peso 1 (único modelo):
-    -------------------------------------------------------
-    Un feature que aparece solo en SBP puede ser una interacción real
-    observada en el cristal (vía PLIP) que LBP no detectó porque RDKit
-    no la modela bien desde el SMILES, o porque la coordenada del punto
-    de interacción difiere ligeramente de la del grupo funcional del ligando.
-    Descartarlos automáticamente significaría perder evidencia experimental.
-    El peso bajo (★☆☆) ya comunica la menor confianza; el usuario decide
-    qué usar para cribado con --min-consensus-weight.
+    Why keep single-model features (weight=1)?
+    -------------------------------------------
+    A feature unique to SBP may represent a real crystal interaction (detected
+    by PLIP) that LBP missed because RDKit did not encode that group well from
+    SMILES, or because the interaction point sits away from the ligand atom.
+    Discarding it silently would discard experimental evidence. Weight ★☆☆
+    signals the lower confidence; the user decides the threshold with
+    --min-consensus-weight.
 
     Returns
     -------
-    Lista de features consenso con:
-      'type'           : tipo del feature (perspectiva del ligando)
-      'coords'         : centroide
+    List of consensus features, each with:
+      'type'           : feature type (ligand perspective)
+      'coords'         : centroid position
       'weight'         : 1–3 (★☆☆ / ★★☆ / ★★★)
-      'models'         : set de modelos {'SBP', 'LBP', 'RBP'}
-      'bfactor'        : 33.3 / 66.7 / 100.0 (para PDB)
-      'rbp_complement' : descripción del feature RBP que lo respalda
+      'models'         : set of contributing model names
+      'bfactor'        : 33.3 / 66.7 / 100.0
+      'rbp_complement' : description of the matching RBP feature, or "—"
     """
     _log = print if verbose else lambda *a, **k: None
 
-    # Pre-etiquetar
-    sbp_t = [{**f, "source": "SBP"} for f in sbp]
-    lbp_t = [{**f, "source": "LBP"} for f in lbp]
-    rbp_t = [{**f, "source": "RBP"} for f in rbp]
+    sbp_tagged = [{**f, "source": "SBP"} for f in sbp]
+    lbp_tagged = [{**f, "source": "LBP"} for f in lbp]
+    rbp_tagged = [{**f, "source": "RBP"} for f in rbp]
 
-    ligand_feats = sbp_t + lbp_t
-    consensus    = []
-    processed    = set()
+    ligand_pool = sbp_tagged + lbp_tagged
+    result = []
+    used = set()
 
-    for i, fi in enumerate(ligand_feats):
-        if i in processed:
+    for i, fi in enumerate(ligand_pool):
+        if i in used:
             continue
 
-        cluster    = [fi]
-        sources    = {fi["source"]}
-        processed.add(i)
-        ci         = np.array(fi["coords"], dtype=float)
-        ftype      = fi["type"]
+        cluster  = [fi]
+        sources  = {fi["source"]}
+        used.add(i)
+        ci    = np.array(fi["coords"], dtype=float)
+        ftype = fi["type"]
 
-        # Buscar features del mismo tipo (ligando) cercanos
-        for j, fj in enumerate(ligand_feats):
-            if j == i or j in processed:
-                continue
-            if fj["type"] != ftype:
+        # Merge features of the same type within radius
+        for j, fj in enumerate(ligand_pool):
+            if j == i or j in used or fj["type"] != ftype:
                 continue
             if np.linalg.norm(ci - np.array(fj["coords"], dtype=float)) < radius:
                 cluster.append(fj)
                 sources.add(fj["source"])
-                processed.add(j)
+                used.add(j)
 
         centroid = np.mean([np.array(f["coords"], dtype=float) for f in cluster], axis=0)
 
-        # Buscar complemento en RBP
-        comp_type    = COMPLEMENT_OF.get(ftype, ftype)
-        rbp_match    = None
-        rbp_dist_min = float("inf")
+        # Look for complementary feature in RBP
+        comp_type = COMPLEMENT_OF.get(ftype, ftype)
+        best_rbp  = None
+        best_dist = float("inf")
 
-        for fr in rbp_t:
+        for fr in rbp_tagged:
             if fr["type"] != comp_type:
                 continue
             d = np.linalg.norm(centroid - np.array(fr["coords"], dtype=float))
-            if d < radius and d < rbp_dist_min:
-                rbp_dist_min = d
-                rbp_match    = fr
+            if d < radius and d < best_dist:
+                best_dist = d
+                best_rbp  = fr
 
         rbp_label = "—"
-        if rbp_match:
+        if best_rbp:
             sources.add("RBP")
-            rbp_label = f"{comp_type} (d={rbp_dist_min:.2f}Å, {rbp_match.get('residue','?')})"
+            rbp_label = f"{comp_type} (d={best_dist:.2f}Å, {best_rbp.get('residue', '?')})"
 
         weight  = len(sources)
         bfactor = round(weight / 3 * 100, 1)
 
-        consensus.append({
+        result.append({
             "type"           : ftype,
             "coords"         : tuple(centroid),
             "models"         : sources,
@@ -137,50 +134,49 @@ def build_consensus(
             "label"          : f"{ftype} [{'+'.join(sorted(sources))}] w={weight}",
         })
 
-    consensus.sort(key=lambda x: (-x["weight"], x["type"]))
+    result.sort(key=lambda x: (-x["weight"], x["type"]))
 
-    triple = [f for f in consensus if f["weight"] == 3]
-    double = [f for f in consensus if f["weight"] == 2]
-    single = [f for f in consensus if f["weight"] == 1]
+    triple = [f for f in result if f["weight"] == 3]
+    double = [f for f in result if f["weight"] == 2]
+    single = [f for f in result if f["weight"] == 1]
 
-    # Filtrar por min_weight (default 1 = conservar todo)
-    consensus_filtered = [f for f in consensus if f["weight"] >= min_weight]
-    discarded = len(consensus) - len(consensus_filtered)
+    filtered = [f for f in result if f["weight"] >= min_weight]
+    n_dropped = len(result) - len(filtered)
 
     _log(f"\n{'='*60}")
-    _log("MODELO FARMACOFORO CONSENSO")
-    _log(f"  Radio de clustering: {radius} Å")
+    _log("CONSENSUS PHARMACOPHORE MODEL")
+    _log(f"  Clustering radius: {radius} Å")
     _log(f"{'='*60}")
-    _log(f"  ★★★ Triple-consenso (SBP+LBP+RBP): {len(triple):3d} features  ← más confiables")
-    _log(f"  ★★☆ Doble-consenso               : {len(double):3d} features")
-    _log(f"  ★☆☆ Único modelo                 : {len(single):3d} features  ← posible evidencia cristalográfica")
-    _log(f"  TOTAL                            : {len(consensus_filtered):3d} features"
-         + (f"  ({discarded} descartados por --min-consensus-weight {min_weight})" if discarded else ""))
+    _log(f"  ★★★ Triple consensus (SBP+LBP+RBP): {len(triple):3d} features  ← most reliable")
+    _log(f"  ★★☆ Double consensus               : {len(double):3d} features")
+    _log(f"  ★☆☆ Single model                   : {len(single):3d} features  ← possible crystal evidence")
+    _log(f"  TOTAL                              : {len(filtered):3d} features"
+         + (f"  ({n_dropped} dropped by --min-consensus-weight {min_weight})" if n_dropped else ""))
+
     if single and min_weight == 1:
-        _log(f"\n  Nota: los {len(single)} features ★☆☆ vienen de un solo modelo.")
-        _log(f"  Pueden ser interacciones reales del cristal no capturadas por LBP.")
-        _log(f"  Para cribado estricto usa: --min-consensus-weight 2")
+        _log(f"\n  Note: the {len(single)} ★☆☆ features come from a single model.")
+        _log(f"  They may represent real crystal interactions not captured by LBP.")
+        _log(f"  For strict screening use: --min-consensus-weight 2")
 
     if triple:
-        _log("\nFeatures triple-consenso:")
-        _log(f"  {'#':>3}  {'Tipo ligando':16s}  {'Complemento RBP':35s}  {'Modelos'}")
+        _log("\nTriple-consensus features:")
+        _log(f"  {'#':>3}  {'Ligand type':16s}  {'RBP complement':35s}  {'Models'}")
         _log(f"  {'─'*70}")
         for i, feat in enumerate(triple):
             _log(f"  [{i+1:02d}] {feat['type']:16s}  {feat['rbp_complement']:35s}  "
                  f"{'+'.join(sorted(feat['models']))}")
 
-    return consensus_filtered
+    return filtered
 
 
 def load_features_from_pdb(pdb_file: str, source_label: str = "LOADED") -> List[Dict[str, Any]]:
     """
-    Carga features farmacofóricos desde un PDB generado por esta herramienta.
+    Load pharmacophoric features from a PDB file written by this tool.
 
-    El formato esperado es el de write_pharmacophore_pdb:
-      ATOM record con nombre de átomo = primera letra del tipo (A/D/H/P/N)
-      Columna occupancy = peso/3 (para consenso) o 1.0 (para SBP/LBP/RBP)
+    Expected format: ATOM records where atom name starts with the type character
+    (A/D/H/P/N), occupancy encodes weight/3, B-factor encodes confidence.
     """
-    TYPE_FROM_CHAR = {
+    _CHAR_TO_TYPE = {
         "A": "ACCEPTOR",
         "D": "DONOR",
         "H": "HYDROPHOBIC",
@@ -193,14 +189,14 @@ def load_features_from_pdb(pdb_file: str, source_label: str = "LOADED") -> List[
             if not line.startswith("ATOM"):
                 continue
             atom_name = line[12:16].strip()
-            char = atom_name[0] if atom_name else "?"
-            ftype = TYPE_FROM_CHAR.get(char)
+            char  = atom_name[0] if atom_name else "?"
+            ftype = _CHAR_TO_TYPE.get(char)
             if ftype is None:
                 continue
             try:
-                x = float(line[30:38])
-                y = float(line[38:46])
-                z = float(line[46:54])
+                x   = float(line[30:38])
+                y   = float(line[38:46])
+                z   = float(line[46:54])
                 occ = float(line[54:60]) if len(line) > 60 else 1.0
                 bf  = float(line[60:66]) if len(line) > 66 else 0.0
             except ValueError:

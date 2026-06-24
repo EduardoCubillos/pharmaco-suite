@@ -1,113 +1,111 @@
 """
-clustering.py — Agrupación de features farmacofóricos.
+clustering.py — Pharmacophoric feature clustering.
 
-Radios de clustering por tipo de feature basados en literatura:
+Groups nearby features of the same type into a single centroid.
+Uses type-specific radii from literature, since hydrogen bonds are
+directional (tight radius ~1.5 Å) while hydrophobics are not (~2.5 Å).
+Collapsing everything to a single radius over-merges H-bonds and
+under-merges hydrophobic contacts.
+
+References:
   - Wolber & Langer (2005) J. Chem. Inf. Model. 45, 160–169
   - Günther et al. (2008) J. Chem. Inf. Model. 48, 2022–2039
   - Dixon et al. (2006) J. Comput.-Aided Mol. Des. 20, 647–671
-
-Principio: los puentes de hidrógeno son direccionales (radio pequeño ~1.5 Å),
-mientras que los contactos hidrofóbicos son no-direccionales (radio mayor ~2.5 Å).
-Usar el mismo radio para todos los tipos sobremerge H-bonds y submerge hidrofóbicos.
 """
 
 import numpy as np
 from collections import defaultdict
 from typing import List, Dict, Any
 
-# ── Radios de clustering por tipo (Å) ─────────────────────────────────────────
-# Referencia principal: Wolber & Langer (2005); Koes & Camacho (2012)
+# Default clustering radii per feature type (Å)
 CLUSTER_RADII: Dict[str, float] = {
-    "DONOR"         : 1.5,   # H-bond: direccional, radio reducido
-    "ACCEPTOR"      : 1.5,   # H-bond: direccional, radio reducido
-    "HYDROPHOBIC"   : 2.5,   # no-direccional, permite más holgura
-    "POS_IONIZABLE" : 2.0,   # interacción iónica: semidireccional
+    "DONOR"         : 1.5,   # directional — tight
+    "ACCEPTOR"      : 1.5,   # directional — tight
+    "HYDROPHOBIC"   : 2.5,   # non-directional — loose
+    "POS_IONIZABLE" : 2.0,
     "NEG_IONIZABLE" : 2.0,
     "AROMATIC"      : 2.0,
 }
 
-DEFAULT_RADIUS = 2.0  # fallback para tipos no catalogados
+_FALLBACK_RADIUS = 2.0  # for any type not in the table above
 
 
 def cluster_features(
     features: List[Dict[str, Any]],
     radii: Dict[str, float] = None,
-    default_radius: float = DEFAULT_RADIUS,
+    fallback_radius: float = _FALLBACK_RADIUS,
 ) -> List[Dict[str, Any]]:
     """
-    Agrupa features farmacofóricos del mismo tipo que estén dentro del radio
-    correspondiente. Devuelve una lista con los centroides.
+    Merge pharmacophoric features of the same type that fall within the
+    type-specific clustering radius. Returns the list of centroids.
 
-    Algoritmo: greedy single-linkage por tipo (rápido y reproducible).
-    Cada feature se une al primer cluster cuyo centro esté dentro del radio;
-    si no hay ninguno, abre un nuevo cluster.
+    Algorithm: greedy single-linkage per feature type. Each incoming
+    feature is assigned to the first existing cluster whose centroid is
+    within the radius; if none qualifies, it starts a new cluster.
+    Fast, reproducible, and good enough for pharmacophore densities.
 
     Parameters
     ----------
-    features : lista de dicts con 'type' y 'coords' (tuple de 3 floats)
-    radii    : dict tipo→radio en Å; si None usa CLUSTER_RADII globales
-    default_radius : radio para tipos no en `radii`
+    features        : list of dicts with at least 'type' and 'coords' (3-tuple)
+    radii           : override dict {feature_type: radius_Å}; defaults to CLUSTER_RADII
+    fallback_radius : radius for types not in `radii`
 
     Returns
     -------
-    Lista de features clusterizados con campos adicionales:
-      'n_merged'  : cuántos features originales se fusionaron
+    List of clustered features with added fields:
+      'n_merged'  : how many raw features were merged into this centroid
       'clustered' : True
     """
     if radii is None:
         radii = CLUSTER_RADII
 
-    # Agrupar por tipo
-    by_type: Dict[str, List] = defaultdict(list)
+    grouped: Dict[str, List] = defaultdict(list)
     for f in features:
-        by_type[f["type"]].append(f)
+        grouped[f["type"]].append(f)
 
-    result = []
-    for ftype, group in by_type.items():
-        radius = radii.get(ftype, default_radius)
-        clusters = _greedy_cluster(group, radius)
-        for cluster in clusters:
+    out = []
+    for ftype, group in grouped.items():
+        r = radii.get(ftype, fallback_radius)
+        for cluster in _assign_to_clusters(group, r):
             coords_arr = np.array([np.array(f["coords"], dtype=float) for f in cluster])
             centroid = tuple(coords_arr.mean(axis=0))
-            # Heredar fuente si todos son iguales
-            sources = set(f.get("source", "?") for f in cluster)
+            sources = {f.get("source", "?") for f in cluster}
             source = sources.pop() if len(sources) == 1 else "mixed"
-            result.append({
+            out.append({
                 "type"      : ftype,
                 "coords"    : centroid,
                 "source"    : source,
                 "n_merged"  : len(cluster),
                 "clustered" : True,
-                "label"     : f"{ftype} [cluster {len(cluster)} pts, r={radius}Å]",
+                "label"     : f"{ftype} [{len(cluster)} pts merged, r={r}Å]",
             })
 
-    return result
+    return out
 
 
-def _greedy_cluster(
+def _assign_to_clusters(
     features: List[Dict[str, Any]], radius: float
 ) -> List[List[Dict[str, Any]]]:
     """
-    Greedy clustering: itera los features en orden y asigna cada uno
-    al primer cluster existente cuyo centroide está dentro del radio.
-    Si ninguno aplica, crea un cluster nuevo.
+    Greedy clustering: iterate features and assign each to the nearest
+    existing cluster within `radius`. Start a new cluster if none qualifies.
+    Centroids are updated incrementally as features are added.
     """
     clusters: List[List[Dict]] = []
     centroids: List[np.ndarray] = []
 
     for f in features:
-        fcoord = np.array(f["coords"], dtype=float)
-        assigned = False
+        fc = np.array(f["coords"], dtype=float)
+        placed = False
         for k, ctr in enumerate(centroids):
-            if np.linalg.norm(fcoord - ctr) < radius:
+            if np.linalg.norm(fc - ctr) < radius:
                 clusters[k].append(f)
-                # Actualizar centroide incrementalmente
                 n = len(clusters[k])
-                centroids[k] = ctr + (fcoord - ctr) / n
-                assigned = True
+                centroids[k] = ctr + (fc - ctr) / n   # running mean
+                placed = True
                 break
-        if not assigned:
+        if not placed:
             clusters.append([f])
-            centroids.append(fcoord.copy())
+            centroids.append(fc.copy())
 
     return clusters

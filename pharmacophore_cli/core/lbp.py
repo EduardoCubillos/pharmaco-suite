@@ -1,28 +1,34 @@
 """
-lbp.py — Farmacóforo Basado en Ligando (Ligand-Based Pharmacophore).
+lbp.py — Ligand-Based Pharmacophore (LBP).
 
-Genera features a partir de uno o múltiples SMILES usando RDKit.
-Cuando se proporciona una lista de ligandos, el modelo LBP es el
-conjunto de features compartidos por al menos `min_frequency` de ellos
-(modelo multi-ligando tipo PHASE/LigandScout).
+Extracts pharmacophoric features from one or more SMILES using RDKit.
+When multiple ligands are given, the model retains only features present
+in at least `min_frequency` of them — similar to PHASE/LigandScout
+multi-ligand consensus mode.
 
-Referencia: RDKit BaseFeatures.fdef (Riniker & Landrum, 2015).
+If a co-crystal PDB is provided, the LBP is aligned to receptor space
+via RMSD alignment of the SMILES-generated 3D conformer to the crystal
+ligand (Kabsch algorithm).
+
+Reference: RDKit BaseFeatures.fdef — Riniker & Landrum (2015).
 """
 
 import numpy as np
+import os
+import sys
 from typing import List, Dict, Any, Optional
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 
-# Mapeo de familias RDKit → tipos canónicos
-FTYPE_MAP = {
-    "Acceptor"          : "ACCEPTOR",
-    "Donor"             : "DONOR",
-    "Hydrophobe"        : "HYDROPHOBIC",
-    "LumpedHydrophobe"  : "HYDROPHOBIC",
-    "PosIonizable"      : "POS_IONIZABLE",
-    "NegIonizable"      : "NEG_IONIZABLE",
-    "Aromatic"          : "HYDROPHOBIC",
+# Map RDKit feature families to canonical types used across the pipeline
+_RDKIT_FAMILY_MAP = {
+    "Acceptor"         : "ACCEPTOR",
+    "Donor"            : "DONOR",
+    "Hydrophobe"       : "HYDROPHOBIC",
+    "LumpedHydrophobe" : "HYDROPHOBIC",
+    "PosIonizable"     : "POS_IONIZABLE",
+    "NegIonizable"     : "NEG_IONIZABLE",
+    "Aromatic"         : "HYDROPHOBIC",
 }
 
 
@@ -33,33 +39,28 @@ def generate_lbp(
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Genera features LBP para uno o varios SMILES.
-
-    Si se proporciona un PDB con el ligando cristalográfico, el primer
-    SMILES se alinea a él para poner el LBP en el espacio de coordenadas
-    del receptor.
+    Generate LBP features for one or more SMILES.
 
     Parameters
     ----------
-    smiles_list          : lista de SMILES; el primero es el ligando principal
-    align_to_pdb         : ruta al PDB para alinear (opcional)
-    align_ligand_resname : nombre del residuo del ligando en el PDB
-    verbose              : imprimir información de progreso
+    smiles_list          : SMILES to process; first one is treated as the primary ligand
+    align_to_pdb         : PDB file to align LBP coordinates into receptor space
+    align_ligand_resname : residue name of the reference ligand in the PDB
+    verbose              : print progress
 
     Returns
     -------
-    Lista de features con 'type', 'coords', 'label', 'source'
+    List of feature dicts with 'type', 'coords', 'label', 'source'
     """
     _log = print if verbose else lambda *a, **k: None
 
     from rdkit import Chem
     from rdkit.Chem import AllChem, ChemicalFeatures, RDConfig
-    import os
 
     fdef_path = os.path.join(RDConfig.RDDataDir, "BaseFeatures.fdef")
     factory   = ChemicalFeatures.BuildFeatureFactory(fdef_path)
 
-    all_features_per_mol = []
+    mol_feature_sets = []
     mols_3d = []
 
     for i, smi in enumerate(smiles_list):
@@ -68,63 +69,61 @@ def generate_lbp(
             continue
         mol = _smiles_to_3d(smi, verbose, index=i)
         if mol is None:
-            _log(f"[LBP] SMILES #{i+1} descartado (no se pudo generar 3D).")
+            _log(f"[LBP] SMILES #{i+1} skipped (could not generate 3D conformer).")
             continue
         mols_3d.append(mol)
-        feats = _extract_features(mol, factory)
-        all_features_per_mol.append(feats)
-        _log(f"[LBP] Molécula #{i+1}: {len(feats)} features crudos.")
+        feats = _extract_rdkit_features(mol, factory)
+        mol_feature_sets.append(feats)
+        _log(f"[LBP] Molecule #{i+1}: {len(feats)} raw features.")
 
-    if not all_features_per_mol:
+    if not mol_feature_sets:
         return []
 
-    # Si hay un solo ligando, tomar todos sus features
-    if len(all_features_per_mol) == 1:
-        features = all_features_per_mol[0]
+    if len(mol_feature_sets) == 1:
+        features = mol_feature_sets[0]
     else:
-        # Multi-ligando: tomar features presentes en ≥50% de los ligandos
-        features = _merge_multi_ligand(all_features_per_mol, verbose)
+        # Keep features present in ≥50% of ligands
+        features = _multi_ligand_consensus(mol_feature_sets, verbose)
 
-    # Alinear al espacio del receptor si se proporciona PDB
+    # Align into receptor coordinate space if a crystal structure is available
     if align_to_pdb and mols_3d:
-        features = _align_to_crystal(
+        features = _align_to_crystal_ligand(
             features, mols_3d[0], align_to_pdb, align_ligand_resname, verbose
         )
 
     for f in features:
         f["source"] = "LBP"
 
-    _log(f"[LBP] {len(features)} features LBP generados.")
+    _log(f"[LBP] {len(features)} LBP features generated.")
     return features
 
 
-# ── Helpers internos ──────────────────────────────────────────────────────────
+# ── Internals ─────────────────────────────────────────────────────────────────
 
 def _smiles_to_3d(smiles: str, verbose: bool, index: int = 0):
-    """Convierte un SMILES en una molécula 3D con MMFF94."""
+    """Embed a SMILES into a 3D conformer using ETKDGv3 + MMFF94."""
     from rdkit import Chem
     from rdkit.Chem import AllChem
-    import sys
 
     mol = Chem.MolFromSmiles(smiles, sanitize=False)
     if mol is None:
-        print(f"[LBP] Error: no se pudo parsear SMILES #{index+1}: {smiles[:60]}",
+        print(f"[LBP] Error: could not parse SMILES #{index+1}: {smiles[:60]}",
               file=sys.stderr)
         return None
     try:
         Chem.SanitizeMol(mol)
     except Exception as e:
-        print(f"[LBP] Advertencia sanitización #{index+1}: {e}", file=sys.stderr)
+        print(f"[LBP] Sanitization warning #{index+1}: {e}", file=sys.stderr)
 
-    mol3d = Chem.AddHs(mol)
+    mol3d  = Chem.AddHs(mol)
     params = AllChem.ETKDGv3()
     params.randomSeed = 42 + index
     status = AllChem.EmbedMolecule(mol3d, params)
     if status != 0:
-        # Reintento con ETKDG clásico
+        # Retry with classic ETKDG — sometimes works when v3 doesn't
         status = AllChem.EmbedMolecule(mol3d, AllChem.ETKDG())
     if status != 0:
-        print(f"[LBP] Error: no se pudo generar conformación 3D para SMILES #{index+1}.",
+        print(f"[LBP] Error: 3D embedding failed for SMILES #{index+1}.",
               file=sys.stderr)
         return None
 
@@ -132,62 +131,59 @@ def _smiles_to_3d(smiles: str, verbose: bool, index: int = 0):
     return Chem.RemoveHs(mol3d)
 
 
-def _extract_features(mol, factory) -> List[Dict[str, Any]]:
-    """Extrae features farmacofóricos de una molécula 3D con RDKit."""
+def _extract_rdkit_features(mol, factory) -> List[Dict[str, Any]]:
+    """Get pharmacophoric features from a 3D RDKit molecule."""
     conf     = mol.GetConformer()
     features = []
     for feat in factory.GetFeaturesForMol(mol):
-        fname = feat.GetFamily()
-        ftype = FTYPE_MAP.get(fname)
+        family = feat.GetFamily()
+        ftype  = _RDKIT_FAMILY_MAP.get(family)
         if ftype is None:
             continue
         atom_ids = list(feat.GetAtomIds())
-        coords   = [conf.GetAtomPosition(idx) for idx in atom_ids]
-        cx = float(np.mean([c.x for c in coords]))
-        cy = float(np.mean([c.y for c in coords]))
-        cz = float(np.mean([c.z for c in coords]))
+        positions = [conf.GetAtomPosition(idx) for idx in atom_ids]
+        cx = float(np.mean([p.x for p in positions]))
+        cy = float(np.mean([p.y for p in positions]))
+        cz = float(np.mean([p.z for p in positions]))
         features.append({
             "type"  : ftype,
-            "family": fname,
+            "family": family,
             "coords": (cx, cy, cz),
             "atoms" : atom_ids,
-            "label" : f"{fname} → {ftype} (átomos: {atom_ids})",
+            "label" : f"{family} → {ftype} (atoms: {atom_ids})",
         })
     return features
 
 
-def _merge_multi_ligand(
-    all_features: List[List[Dict]],
+def _multi_ligand_consensus(
+    mol_feature_sets: List[List[Dict]],
     verbose: bool,
     overlap_radius: float = 2.0,
     min_freq: float = 0.5,
 ) -> List[Dict[str, Any]]:
     """
-    Para múltiples ligandos: conserva features que aparecen en al menos
-    `min_freq` fracción de los ligandos. Los features similares (mismo
-    tipo, distancia < overlap_radius) se fusionan en su centroide.
-
-    Estrategia: votar features por tipo entre moléculas.
+    Multi-ligand LBP: keep features present in at least `min_freq` fraction
+    of the input molecules. Features of the same type within `overlap_radius`
+    of each other are merged into their centroid.
     """
     _log = print if verbose else lambda *a, **k: None
-    n_mols = len(all_features)
+    n_mols    = len(mol_feature_sets)
     min_count = max(1, int(np.ceil(min_freq * n_mols)))
 
-    # Aplanar con etiqueta de molécula
+    # Tag each feature with its molecule index
     tagged = []
-    for mol_idx, feats in enumerate(all_features):
+    for mol_idx, feats in enumerate(mol_feature_sets):
         for f in feats:
             tagged.append({**f, "_mol": mol_idx})
 
-    # Agrupar por tipo
-    by_type = defaultdict(list)
+    by_type: Dict[str, List] = defaultdict(list)
     for f in tagged:
         by_type[f["type"]].append(f)
 
-    consensus = []
+    result = []
     for ftype, group in by_type.items():
-        # Clustering greedy dentro del tipo
-        clusters = []
+        # Greedy spatial clustering per type
+        clusters  = []
         centroids = []
         for f in group:
             fc = np.array(f["coords"], dtype=float)
@@ -204,21 +200,21 @@ def _merge_multi_ligand(
                 centroids.append(fc.copy())
 
         for cluster, ctr in zip(clusters, centroids):
-            mols_present = set(f["_mol"] for f in cluster)
-            if len(mols_present) >= min_count:
-                consensus.append({
-                    "type"     : ftype,
-                    "coords"   : tuple(ctr),
-                    "label"    : f"{ftype} multi-ligando ({len(mols_present)}/{n_mols} mols)",
-                    "n_mols"   : len(mols_present),
+            n_mols_present = len({f["_mol"] for f in cluster})
+            if n_mols_present >= min_count:
+                result.append({
+                    "type"  : ftype,
+                    "coords": tuple(ctr),
+                    "label" : f"{ftype} multi-ligand ({n_mols_present}/{n_mols} mols)",
+                    "n_mols": n_mols_present,
                 })
 
-    _log(f"[LBP] Multi-ligando: {len(consensus)} features consenso "
-         f"(mín {min_count}/{n_mols} ligandos).")
-    return consensus
+    _log(f"[LBP] Multi-ligand: {len(result)} consensus features "
+         f"(min {min_count}/{n_mols} ligands).")
+    return result
 
 
-def _align_to_crystal(
+def _align_to_crystal_ligand(
     features: List[Dict],
     mol3d,
     pdb_file: str,
@@ -226,19 +222,16 @@ def _align_to_crystal(
     verbose: bool,
 ) -> List[Dict[str, Any]]:
     """
-    Alinea las coordenadas LBP al espacio del receptor usando el RMSD
-    de alineamiento 3D entre el ligando SMILES y el ligando cristalográfico.
+    Align LBP feature coordinates to receptor space by superimposing
+    the RDKit 3D conformer onto the crystal ligand (Kabsch RMSD alignment).
     """
     _log = print if verbose else lambda *a, **k: None
 
     try:
-        from rdkit import Chem
-        from rdkit.Chem import AllChem, rdMolAlign
         from Bio.PDB import PDBParser
-        import io, warnings
+        import warnings
         warnings.filterwarnings("ignore")
 
-        # Extraer coordenadas del ligando cristalográfico
         parser = PDBParser(QUIET=True)
         struct = parser.get_structure("ref", pdb_file)
         crystal_atoms = []
@@ -249,53 +242,49 @@ def _align_to_crystal(
                     break
 
         if not crystal_atoms:
-            _log(f"[LBP] Advertencia: ligando '{ligand_resname}' no encontrado en PDB, sin alineamiento.")
+            _log(f"[LBP] Warning: ligand '{ligand_resname}' not found in PDB — skipping alignment.")
             return features
 
-        # Construir molécula de referencia desde coordenadas del cristal
-        ref_coords = np.array([a.get_vector().get_array() for a in crystal_atoms])
-        n_heavy_ref = len(ref_coords)
-        n_heavy_mol = mol3d.GetNumAtoms()
+        ref_coords   = np.array([a.get_vector().get_array() for a in crystal_atoms])
+        n_heavy_ref  = len(ref_coords)
+        n_heavy_mol  = mol3d.GetNumAtoms()
 
         if n_heavy_mol != n_heavy_ref:
-            _log(f"[LBP] Advertencia: átomos pesados distintos ({n_heavy_mol} vs {n_heavy_ref}). "
-                 "Alineamiento por RMSD omitido, se usan coords relativas.")
+            _log(f"[LBP] Warning: atom count mismatch ({n_heavy_mol} vs {n_heavy_ref}). "
+                 "Skipping alignment — using relative LBP coordinates.")
             return features
 
-        # RMSD-align mol3d al cristal
         conf = mol3d.GetConformer()
         mol_coords = np.array([list(conf.GetAtomPosition(i)) for i in range(n_heavy_mol)])
 
-        # Centrar y alinear (Kabsch)
         R, t = _kabsch(mol_coords, ref_coords)
         mol_coords_aligned = (mol_coords @ R.T) + t
         rmsd = float(np.sqrt(np.mean(np.sum((mol_coords_aligned - ref_coords)**2, axis=1))))
-        _log(f"[LBP] RMSD de alineamiento al cristal: {rmsd:.3f} Å")
+        _log(f"[LBP] Alignment RMSD to crystal: {rmsd:.3f} Å")
 
-        # Trasladar features LBP con la misma transformación
+        # Apply same transformation to all feature coordinates
         aligned = []
         for f in features:
             fc = np.array(f["coords"], dtype=float)
-            fc_al = (fc @ R.T) + t
-            aligned.append({**f, "coords": tuple(fc_al)})
+            aligned.append({**f, "coords": tuple((fc @ R.T) + t)})
         return aligned
 
     except Exception as e:
-        _log(f"[LBP] Alineamiento fallido ({e}), se devuelven features sin alinear.")
+        _log(f"[LBP] Alignment failed ({e}), returning unaligned features.")
         return features
 
 
 def _kabsch(P: np.ndarray, Q: np.ndarray):
     """
-    Algoritmo de Kabsch: encuentra R y t que minimiza RMSD entre P y Q.
-    P_aligned = P @ R.T + t
+    Kabsch algorithm: find rotation R and translation t minimizing RMSD(P, Q).
+    Usage: P_aligned = P @ R.T + t
     """
     p_mean = P.mean(axis=0)
     q_mean = Q.mean(axis=0)
-    P_c = P - p_mean
-    Q_c = Q - q_mean
+    Pc     = P - p_mean
+    Qc     = Q - q_mean
 
-    H  = P_c.T @ Q_c
+    H  = Pc.T @ Qc
     U, _, Vt = np.linalg.svd(H)
     d  = np.linalg.det(Vt.T @ U.T)
     D  = np.diag([1, 1, d])

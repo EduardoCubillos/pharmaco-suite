@@ -1,267 +1,284 @@
 # pharmaco_suite
 
-Herramientas de línea de comandos para modelado de farmacóforos y diseño de novo molecular.
+A command-line toolkit for 3D pharmacophore modeling and structure-guided de novo molecular design. Built around the idea that a pharmacophore model is only as reliable as the evidence behind it — so instead of picking one approach, this tool runs three independently and lets them vote.
 
-**Autor:** Eduardo Cubillos-Llantén  
-**Programa:** Bioinformática — Biomedicina y Biofarmacéutica, Universidad de Talca
+**Author:** Eduardo Cubillos
 
 ---
 
-## Estructura
+## What it does
+
+`pharmaco_suite` has two independent modules:
 
 ```
 pharmaco_suite/
-├── pharmacophore_cli/   Modelado de farmacóforos (SBP, LBP, RBP, consenso)
-└── denovo_cli/          Diseño de novo molecular (LBP multi-ligando → GA SELFIES → SDF/PDBQT)
+├── pharmacophore_cli/   3D pharmacophore generation (SBP, LBP, RBP, consensus)
+└── denovo_cli/          De novo molecule design (multi-ligand LBP → genetic algorithm → SDF)
 ```
 
 ---
 
-## Instalación
+## Installation
 
 ```bash
-# Crear entorno conda (recomendado)
+# Recommended: create a dedicated conda environment
 conda create -n pharmaco python=3.11 -y
 conda activate pharmaco
 
-# Instalar dependencias
+# Install all dependencies
 bash install.sh
 ```
 
-O manualmente:
+Manual install:
 
 ```bash
 conda install -c conda-forge rdkit -y
-pip install selfies biopython requests numpy pandas py3Dmol lxml
-pip install meeko          # opcional, para preparar PDBQT
-pip install plip --no-deps # opcional, para SBP mejorado
+pip install selfies biopython requests numpy pandas py3Dmol lxml scipy
+pip install plip          # optional but recommended for structure-based pharmacophores
+pip install meeko         # optional, needed for PDBQT export (docking)
 ```
 
 ---
 
-## pharmacophore_cli — Modelado de Farmacóforos
+## pharmacophore_cli — Pharmacophore Modeling
 
-Genera modelos SBP (basado en estructura), LBP (basado en ligando), RBP (basado en receptor) y un modelo consenso a partir de complejos cristalográficos y SMILES.
+Generates structure-based (SBP), ligand-based (LBP), and receptor-based (RBP) pharmacophore models, then builds a weighted consensus from the three perspectives.
 
-### Uso rápido
+### Quick start
 
 ```bash
 cd pharmacophore_cli
 
-# Pipeline completo: descarga PDB, genera SBP+LBP+RBP+consenso
+# Full pipeline: download structure, run SBP + LBP + RBP, build consensus
 python pharmacophore.py all \
   --pdb 1HXW \
   --ligand RIT \
-  --smiles "CC(C)C1=NC(=CS1)CN(C)C(=O)..." \
-  --outdir resultados/
+  --smiles "CC(C)C1=NC(=CS1)CN(C)C(=O)N[C@@H](C(C)C)C(=O)N[C@@H](CC2=CC=CC=C2)C[C@@H]([C@H](CC3=CC=CC=C3)NC(=O)OCC4=CN=CS4)O" \
+  --outdir results/
 
-# Solo SBP con PDB local
-python pharmacophore.py sbp --pdb-file mi_proteina.pdb --ligand LIG
+# SBP only, from a local PDB file
+python pharmacophore.py sbp --pdb-file my_protein.pdb --ligand LIG
 
-# LBP desde múltiples SMILES (separar con |)
+# LBP from multiple SMILES (pipe-separated or from file)
 python pharmacophore.py lbp --smiles "SMILES1|SMILES2|SMILES3"
+python pharmacophore.py lbp --smiles-file active_compounds.smi
 
-# LBP desde archivo
-python pharmacophore.py lbp --smiles-file ligandos.smi
+# RBP with custom binding site radius and pH
+python pharmacophore.py rbp --pdb 1HXW --ligand RIT --site-cutoff 5.0 --ph 6.5
 
-# RBP con pH personalizado
-python pharmacophore.py rbp --pdb 1HXW --ligand RIT --ph 6.5
-
-# Consenso desde PDBs ya generados
+# Build consensus from previously generated PDB files
 python pharmacophore.py consensus \
   --sbp pharmacophore_sbp.pdb \
   --lbp pharmacophore_lbp.pdb \
   --rbp pharmacophore_rbp.pdb
 ```
 
-### Subcomandos
+### Subcommands
 
-| Subcomando | Descripción |
+| Subcommand | Description |
 |---|---|
-| `sbp` | Farmacóforo Basado en Estructura (PLIP + fallback BioPython) |
-| `lbp` | Farmacóforo Basado en Ligando (RDKit, uno o múltiples SMILES) |
-| `rbp` | Farmacóforo Basado en Receptor (pH 7.4, sitio activo) |
-| `all` | Ejecutar SBP + LBP + RBP + consenso automáticamente |
-| `consensus` | Cargar modelos PDB ya generados y construir el consenso |
+| `sbp` | Structure-Based Pharmacophore — uses PLIP to extract protein-ligand interactions from a crystal structure, falls back to BioPython distance analysis if PLIP is unavailable |
+| `lbp` | Ligand-Based Pharmacophore — uses RDKit feature detection on one or more ligand SMILES; multi-ligand mode keeps features present in ≥50% of compounds |
+| `rbp` | Receptor-Based Pharmacophore — maps the binding site residues to pharmacophoric features at physiological pH, accounting for protonation states |
+| `all` | Runs all three models and builds the consensus automatically |
+| `consensus` | Loads previously generated PDB files and builds the consensus from them |
 
-### Parámetros de clustering
+### Clustering radii
 
-Por defecto usa radios basados en literatura (Wolber & Langer, 2005):
+Default radii follow Wolber & Langer (2005), which distinguish directional from non-directional interactions:
 
-| Tipo | Radio default | Argumento |
+| Feature type | Default radius | Flag |
 |---|---|---|
 | DONOR / ACCEPTOR | 1.5 Å | `--radius-donor`, `--radius-acceptor` |
 | HYDROPHOBIC | 2.5 Å | `--radius-hydro` |
 | POS/NEG IONIZABLE | 2.0 Å | `--radius-pos`, `--radius-neg` |
-| Global (todos) | — | `--cluster-radius` |
-
-### Modelo consenso
-
-El consenso **no es una superposición** de los tres modelos. Es un proceso de validación cruzada en tres pasos:
-
-1. **Fusión SBP + LBP:** se agrupan features del mismo tipo (DONOR, ACCEPTOR, etc.) que estén a menos de `--consensus-radius` Å entre sí. Si SBP y LBP identifican un DONOR en la misma región del espacio, se fusionan en un solo feature con peso ≥ 2.
-
-2. **Validación con RBP:** para cada feature ligando fusionado, se busca en el RBP un feature *complementario* en la misma zona (DONOR ↔ ACCEPTOR, HYDROPHOBIC ↔ HYDROPHOBIC, etc.). Si se encuentra, el peso sube a 3.
-
-3. **Filtro de calidad:** solo se incluyen features respaldados por **≥ 2 modelos** (`--min-consensus-weight 2`, por defecto). Un feature que solo aparece en un único modelo no es consenso y se descarta.
-
-#### Niveles de confianza
-
-| Peso | Etiqueta | Significado | Esfera en viewer 3D |
-|------|----------|-------------|---------------------|
-| ★★★ (3) | Triple consenso | SBP + LBP + RBP coinciden | grande, muy opaca |
-| ★★☆ (2) | Doble consenso | 2 de los 3 modelos coinciden | mediana, semiopaca |
-| ★☆☆ (1) | Único modelo | Solo 1 modelo — incluido por defecto | pequeña, tenue |
-
-Los features de mayor peso son los más robustos para cribado virtual (Baroni et al., 2007).
-
-**¿Por qué incluir los features de peso ★☆☆ (un solo modelo)?**
-
-Un feature que aparece únicamente en SBP puede ser una interacción real observada en el cristal (detectada por PLIP) que LBP no captó — ya sea porque RDKit no la modela bien desde el SMILES, o porque la posición del punto de interacción difiere ligeramente de la del grupo funcional del ligando. Descartar estos features automáticamente implicaría perder evidencia experimental válida. El peso bajo ★☆☆ comunica la menor confianza; el investigador decide qué umbral usar según el contexto.
-
-```bash
-# Default: incluir todo (★☆☆ a ★★★) — conserva posible evidencia cristalográfica
-python pharmacophore.py all ...
-
-# Cribado estricto: solo features de ≥2 modelos
-python pharmacophore.py all ... --min-consensus-weight 2
-
-# Máxima confianza: solo triple consenso
-python pharmacophore.py all ... --min-consensus-weight 3
-```
-
-### Grafo farmacofórico 2D
-
-El subcomando `all` genera automáticamente un grafo que representa la geometría del farmacóforo consenso:
-
-- **Nodos** — features farmacofóricos, con color por tipo y tamaño proporcional al peso (★★★ > ★★☆)
-- **Aristas** — árbol de expansión mínima (MST) sobre las distancias 3D entre features; reduce N×(N−1)/2 conexiones a solo N−1, mostrando la topología esencial sin ruido visual
-- **Etiquetas** — distancias en Å sobre las 5 aristas más cortas; ángulos MST en el recuadro inferior izquierdo
-- **HTML interactivo** — permite arrastrar nodos (vis.js) y ver distancias al pasar el cursor sobre las aristas
-
-### Archivos generados
-
-- `pharmacophore_sbp.pdb` — features SBP clusterizados
-- `pharmacophore_lbp.pdb` — features LBP clusterizados
-- `pharmacophore_rbp.pdb` — features RBP clusterizados
-- `pharmacophore_consensus.pdb` — modelo consenso (B-factor = nivel de confianza)
-- `pharmacophore_sbp.html` — visualización 3D interactiva SBP (abrir en navegador)
-- `pharmacophore_lbp.html` — visualización 3D interactiva LBP
-- `pharmacophore_rbp.html` — visualización 3D interactiva RBP
-- `pharmacophore_overlap.html` — superposición 3D de los tres modelos clusterizados
-- `pharmacophore_consensus.html` — visualización 3D del consenso final
-- `pharmacophore_consensus_graph.png` — grafo farmacofórico 2D (imagen estática)
-- `pharmacophore_consensus_graph.pdf` — grafo farmacofórico 2D (vectorial)
-- `pharmacophore_consensus_graph.html` — grafo farmacofórico 2D interactivo
+| All types (global override) | — | `--cluster-radius` |
 
 ---
 
-## denovo_cli — Diseño de Novo Molecular
+### Consensus model
 
-Genera moléculas candidatas nuevas a partir de ligandos activos conocidos, usando un farmacóforo LBP multi-ligando como guía y un Algoritmo Genético SELFIES para la generación.
+The consensus is not a visual overlay of three models. It is a cross-validation process:
 
-### Uso rápido
+**Step 1 — SBP + LBP fusion (ligand perspective):**
+Features of the same type (e.g., DONOR) within `--consensus-radius` Å of each other are merged into a single centroid. A feature present in both SBP and LBP gets weight ≥ 2.
+
+**Step 2 — RBP validation (receptor perspective):**
+For each merged ligand feature, the algorithm searches the RBP model for a chemically complementary feature in the same region (DONOR ↔ ACCEPTOR, HYDROPHOBIC ↔ HYDROPHOBIC, etc.). A match raises the weight to 3.
+
+**Step 3 — Confidence filter:**
+Features are retained based on `--min-consensus-weight` (default: 1 = keep everything).
+
+#### Confidence levels
+
+| Weight | Label | Meaning | Sphere in 3D viewer |
+|--------|-------|---------|---------------------|
+| ★★★ (3) | Triple consensus | SBP + LBP + RBP all agree | large, nearly opaque |
+| ★★☆ (2) | Double consensus | 2 of 3 models agree | medium, semi-transparent |
+| ★☆☆ (1) | Single model | Only 1 model — included by default | small, faint |
+
+Higher-weight features are the most reliable for virtual screening (Baroni et al., 2007).
+
+**Why keep single-model features (weight ★☆☆)?**
+
+A feature that appears only in the SBP can represent a real crystal interaction detected by PLIP that the LBP simply missed — either because RDKit did not encode that group well from the SMILES, or because the interaction geometry doesn't overlap cleanly with the ligand atom position. Discarding it automatically would mean throwing away experimental evidence. The low weight signals lower confidence; the researcher decides what threshold to use for their application.
+
+```bash
+# Default: keep everything (★☆☆ to ★★★) — preserves potential crystal evidence
+python pharmacophore.py all ...
+
+# Strict screening: only features supported by ≥2 models
+python pharmacophore.py all ... --min-consensus-weight 2
+
+# Maximum confidence: triple consensus only
+python pharmacophore.py all ... --min-consensus-weight 3
+```
+
+---
+
+### 2D pharmacophore graph
+
+The `all` subcommand also generates a graph representation of the consensus model:
+
+- **Nodes** — pharmacophoric features, colored by type, sized proportionally to consensus weight
+- **Edges** — minimum spanning tree (MST) of 3D pairwise distances; reduces N×(N-1)/2 connections to N-1, showing the essential topology without visual noise
+- **Edge labels** — distances in Å on the 5 shortest edges; MST angles in the bottom-left inset
+- **Interactive HTML** — drag nodes, hover edges for distances (vis.js, no external dependencies at runtime)
+
+---
+
+### Output files
+
+```
+pharmacophore_sbp.pdb              SBP features (clustered)
+pharmacophore_lbp.pdb              LBP features (clustered)
+pharmacophore_rbp.pdb              RBP features (clustered)
+pharmacophore_consensus.pdb        Consensus model (B-factor = confidence level)
+pharmacophore_sbp.html             Interactive 3D viewer — SBP
+pharmacophore_lbp.html             Interactive 3D viewer — LBP
+pharmacophore_rbp.html             Interactive 3D viewer — RBP
+pharmacophore_overlap.html         3D overlay of all three clustered models
+pharmacophore_consensus.html       3D viewer — consensus model
+pharmacophore_consensus_graph.png  2D pharmacophore graph (static)
+pharmacophore_consensus_graph.pdf  2D pharmacophore graph (vector)
+pharmacophore_consensus_graph.html 2D pharmacophore graph (interactive)
+plip_output/                       PLIP XML reports and protonated PDB (if PLIP available)
+```
+
+---
+
+## denovo_cli — De Novo Molecular Design
+
+Generates new candidate molecules from a set of known active compounds, using a multi-ligand LBP profile as a pharmacophoric fitness function and a SELFIES-based genetic algorithm for structure generation.
+
+### Quick start
 
 ```bash
 cd denovo_cli
 
-# Pipeline completo desde ChEMBL (usar ChEMBL ID del target)
-# Buscar el ID en https://www.ebi.ac.uk/chembl/ → Target → copiar CHEMBL ID
-python denovo.py run --target "CHEMBL247" --n 20 --outdir resultados/
+# Full pipeline from ChEMBL (use target ChEMBL ID for reliable results)
+# Find the ID at https://www.ebi.ac.uk/chembl/ → Target Search → copy CHEMBL ID
+python denovo.py run --target "CHEMBL247" --n 20 --outdir results/
 
-# Pipeline desde archivo propio de ligandos
-python denovo.py run --file mis_ligandos.smi --n 20 --outdir resultados/
+# Full pipeline from your own ligand file
+python denovo.py run --file active_ligands.smi --n 20 --outdir results/
 
-# Con farmacóforo PDB del pharmacophore_cli (scoring 3D adicional)
+# With an LBP pharmacophore for additional 3D scoring
 python denovo.py run \
-  --target "HIV protease" \
+  --target "CHEMBL247" \
   --n 20 \
-  --pharmacophore ../pharmacophore_cli/resultados/pharmacophore_lbp.pdb \
-  --outdir resultados/
+  --pharmacophore ../pharmacophore_cli/results/pharmacophore_lbp.pdb \
+  --outdir results/
 
-# Solo descargar ligandos activos desde ChEMBL (usar ID, no nombre libre)
+# Download active compounds from ChEMBL (use ChEMBL ID)
 python denovo.py fetch --target "CHEMBL247" --n 50 --out ligands.smi
 
-# Filtrar ADMET de un SDF existente
-python denovo.py filter --sdf moleculas.sdf --outdir filtradas/
+# Filter ADMET properties on an existing SDF
+python denovo.py filter --sdf molecules.sdf --outdir filtered/
 ```
 
-### Pipeline completo (subcomando `run`)
+### Pipeline overview
 
 ```
-Ligandos activos (ChEMBL o archivo)
-    │
-    ▼
-Perfil LBP multi-ligando
-(features presentes en ≥50% de los ligandos)
-    │
-    ▼
-Algoritmo Genético SELFIES
-(N generaciones, población de tamaño P)
-    │
-    ▼
-Filtro ADMET (Lipinski, QED ≥ 0.3, SA ≤ 5, PSA ≤ 140 Å²)
-    │
-    ▼
-Filtro de diversidad (Tanimoto < 0.85 entre candidatas)
-    │
-    ▼
-Top N candidatas → SDF 3D + PDBQT (si Meeko instalado) + CSV métricas
+Active ligands (ChEMBL or local file)
+        │
+        ▼
+Multi-ligand LBP profile
+(features in ≥50% of training compounds)
+        │
+        ▼
+SELFIES Genetic Algorithm
+(N generations, population size P)
+        │
+        ▼
+ADMET filter (Lipinski, QED ≥ 0.3, SA ≤ 5, PSA ≤ 140 Å²)
+        │
+        ▼
+Diversity filter (Tanimoto < 0.85 between candidates)
+        │
+        ▼
+Top N candidates → 3D SDF + PDBQT (if Meeko installed) + CSV metrics
 ```
 
-### Subcomandos
+### Subcommands
 
-| Subcomando | Descripción |
+| Subcommand | Description |
 |---|---|
-| `run` | Pipeline completo: ligandos → LBP → GA → ADMET → SDF + PDBQT |
-| `fetch` | Descargar ligandos activos desde ChEMBL o cargar desde archivo |
-| `filter` | Aplicar filtro ADMET a un SDF existente |
+| `run` | Full pipeline: ligands → LBP → GA → ADMET → SDF + PDBQT |
+| `fetch` | Download active compounds from ChEMBL or load from local file |
+| `filter` | Apply ADMET filters to an existing SDF |
 
-### Parámetros clave de `run`
+### Key parameters for `run`
 
-| Argumento | Default | Descripción |
+| Argument | Default | Description |
 |---|---|---|
-| `--target` | — | ChEMBL ID del target (ej. "CHEMBL247"). Buscar en ebi.ac.uk/chembl → Target |
-| `--file` | — | Archivo local de ligandos (.smi, .sdf, .csv) |
-| `--n` | 20 | Número de moléculas a generar |
-| `--n-ligands` | 50 | Ligandos de entrenamiento a usar |
-| `--pharmacophore` | — | PDB de farmacóforo para scoring 3D adicional |
-| `--pop-size` | 60 | Tamaño de la población del GA |
-| `--n-gen` | 50 | Generaciones del GA |
-| `--diversity` | 0.85 | Tanimoto máximo entre candidatas finales |
+| `--target` | — | ChEMBL target ID (e.g., "CHEMBL247"). Find at ebi.ac.uk/chembl → Target |
+| `--file` | — | Local ligand file (.smi, .sdf, .csv) |
+| `--n` | 20 | Number of candidate molecules to generate |
+| `--n-ligands` | 50 | Max training ligands to use |
+| `--pharmacophore` | — | PDB pharmacophore file for additional 3D scoring |
+| `--pop-size` | 60 | GA population size |
+| `--n-gen` | 50 | GA generations |
+| `--diversity` | 0.85 | Max Tanimoto similarity between final candidates |
 
-### Archivos generados
+### Output files
 
-- `candidates.sdf` — moléculas con conformaciones 3D y metadatos ADMET
-- `candidates.pdbqt` — listos para AutoDock Vina (si Meeko instalado)
-- `candidates_admet.csv` — tabla con todas las métricas
-- `ligands_training.smi` — ligandos de entrenamiento usados
-- `PREPARACION_DOCKING.md` — instrucciones para preparar el docking
+```
+candidates.sdf           Molecules with 3D conformations and ADMET metadata
+candidates.pdbqt         Ready for AutoDock Vina (if Meeko installed)
+candidates_admet.csv     Full metrics table
+ligands_training.smi     Training ligands used
+PREPARACION_DOCKING.md   Docking preparation instructions (in Spanish, for now)
+```
 
 ---
 
-## Flujo completo para el proyecto
+## End-to-end example: HIV-1 protease inhibitor design
 
 ```bash
-# 1. Generar farmacóforos SBP + LBP
+# 1. Generate pharmacophore models from the Ritonavir co-crystal structure (1HXW)
 python pharmacophore_cli/pharmacophore.py all \
-  --pdb 1HXW --ligand RIT \
-  --smiles "SMILES_del_ligando" \
-  --outdir farmacoforos/
+  --pdb 1HXW \
+  --ligand RIT \
+  --smiles "CC(C)C1=NC(=CS1)CN(C)C(=O)N[C@@H](C(C)C)C(=O)N[C@@H](CC2=CC=CC=C2)C[C@@H]([C@H](CC3=CC=CC=C3)NC(=O)OCC4=CN=CS4)O" \
+  --outdir pharmacophores/
 
-# 2. Generar 20 moléculas nuevas usando el LBP como guía
+# Open the consensus viewer to inspect the model
+open pharmacophores/pharmacophore_consensus.html
+
+# 2. Design 20 new molecules guided by the LBP profile
 python denovo_cli/denovo.py run \
-  --target "HIV protease" \
+  --target "CHEMBL247" \
   --n 20 \
-  --pharmacophore farmacoforos/pharmacophore_lbp.pdb \
-  --outdir candidatas/
+  --pharmacophore pharmacophores/pharmacophore_lbp.pdb \
+  --outdir candidates/
 
-# 3. Preparar receptor para docking
-prepare_receptor4.py -r 1HXW_proteina.pdb -o 1HXW.pdbqt
+# 3. Prepare receptor for docking
+prepare_receptor4.py -r 1HXW_protein.pdb -o 1HXW.pdbqt
 
-# 4. Correr docking con AutoDock Vina
+# 4. Run AutoDock Vina
 vina --receptor 1HXW.pdbqt \
-     --ligands candidatas/candidates.pdbqt \
+     --ligands candidates/candidates.pdbqt \
      --center_x -5 --center_y 4 --center_z 15 \
      --size_x 25 --size_y 25 --size_z 25 \
      --exhaustiveness 16
@@ -269,14 +286,16 @@ vina --receptor 1HXW.pdbqt \
 
 ---
 
-## Referencias
+## References
 
-- Wolber & Langer (2005) *J. Chem. Inf. Model.* 45, 160–169 — radios de clustering farmacofórico
-- Baroni et al. (2007) *J. Chem. Inf. Model.* 47, 279–294 — consenso ponderado (PHASE), niveles de confianza
-- Sanders et al. (2012) *J. Chem. Inf. Model.* 52, 1261–1272 — validación de modelos consenso
-- Krenn et al. (2020) *Machine Learning: Science and Technology* 1, 045024 — SELFIES
+- Wolber & Langer (2005) *J. Chem. Inf. Model.* 45, 160–169 — pharmacophore clustering radii
+- Baroni et al. (2007) *J. Chem. Inf. Model.* 47, 279–294 — weighted consensus (PHASE)
+- Sanders et al. (2012) *J. Chem. Inf. Model.* 52, 1261–1272 — consensus model validation
+- Salentin et al. (2015) *Nucleic Acids Res.* 43, W443–W447 — PLIP
+- Riniker & Landrum (2015) *J. Chem. Inf. Model.* 55, 2562–2574 — RDKit pharmacophore features
+- Sliwoski et al. (2014) *Pharmacol. Rev.* 66, 334–395 — receptor-based pharmacophores
+- Krenn et al. (2020) *Mach. Learn.: Sci. Technol.* 1, 045024 — SELFIES
 - Lipinski et al. (2001) *Adv. Drug Deliv. Rev.* 46, 3–26 — Rule of Five
 - Bickerton et al. (2012) *Nature Chemistry* 4, 90–98 — QED
 - Ertl & Schuffenhauer (2009) *J. Cheminform.* 1, 8 — SA Score
-- Salentin et al. (2015) *Nucleic Acids Res.* 43, W443–W447 — PLIP
 - Eberhardt et al. (2021) *J. Chem. Inf. Model.* 61, 3891–3898 — AutoDock Vina

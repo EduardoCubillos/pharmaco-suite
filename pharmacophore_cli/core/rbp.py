@@ -1,23 +1,27 @@
 """
-rbp.py — Farmacóforo Basado en Receptor (Receptor-Based Pharmacophore).
+rbp.py — Receptor-Based Pharmacophore (RBP).
 
-Genera features a partir de los residuos del sitio activo del receptor,
-teniendo en cuenta el estado de protonación a pH fisiológico (7.4).
+Maps binding site residues to pharmacophoric features at a given pH.
+RBP features describe what the *receptor* offers — the complementary
+picture to the ligand-perspective models (SBP, LBP):
 
-Los features del RBP representan lo que OFRECE el receptor:
-  - DONOR en el receptor → el receptor dona H → el ligando debe aceptar (ACCEPTOR)
-  - ACCEPTOR en el receptor → el ligando debe donar (DONOR)
+  receptor DONOR    → ligand must have an ACCEPTOR
+  receptor ACCEPTOR → ligand must have a DONOR
 
-Referencia:
-  - Sliwoski et al. (2014) Pharmacol Rev 66, 334–395
+Protonation states are derived from standard pKa values (Henderson-
+Hasselbalch) with overrides for known catalytic residues (e.g., HIV-1
+protease Asp25, which is monoprotonated in the active dimer).
+
+References:
+  - Sliwoski et al. (2014) Pharmacol. Rev. 66, 334–395
   - Koes & Camacho (2012) J. Chem. Inf. Model. 52, 2098–2106
 """
 
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
-# ── pKa estándar a 25°C (Lehninger, 5ª ed.) ──────────────────────────────────
-STANDARD_PKA: Dict[str, float] = {
+# Standard side-chain pKa values at 25°C (Lehninger Biochemistry, 5th ed.)
+_STANDARD_PKA: Dict[str, float] = {
     "ASP": 3.9,
     "GLU": 4.1,
     "HIS": 6.0,
@@ -27,38 +31,38 @@ STANDARD_PKA: Dict[str, float] = {
     "ARG": 12.5,
 }
 
-# Protonaciones especiales que anulan el cálculo por pKa
-SPECIAL_PROTONATION: Dict[Tuple[str, str], str] = {
-    # Asp catalítico de la proteasa del VIH-1 (monoprotonado en el dímero)
-    ("ASP", "25A"): "PROTONATED",    # dona H → DONOR
-    ("ASP", "25B"): "DEPROTONATED",  # acepta H → ACCEPTOR
+# Hard overrides for known catalytic residues (ignores pKa-based calculation)
+# HIV-1 protease: the catalytic dyad is monoprotonated — Asp25A donates, Asp25B accepts
+_PROTONATION_OVERRIDES: Dict[Tuple[str, str], str] = {
+    ("ASP", "25A"): "PROTONATED",
+    ("ASP", "25B"): "DEPROTONATED",
 }
 
-SITE_CUTOFF_DEFAULT = 6.0   # Å desde cualquier átomo del ligando
-PH_PHYSIOLOGICAL   = 7.4
+_BINDING_SITE_CUTOFF = 6.0   # Å from any ligand atom
+_DEFAULT_PH          = 7.4
 
 
 def generate_rbp(
     pdb_file: str,
     ligand_resname: str = "RIT",
-    site_cutoff: float = SITE_CUTOFF_DEFAULT,
-    ph: float = PH_PHYSIOLOGICAL,
+    site_cutoff: float = _BINDING_SITE_CUTOFF,
+    ph: float = _DEFAULT_PH,
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Genera features RBP.
+    Generate RBP features for the binding site around the specified ligand.
 
     Parameters
     ----------
-    pdb_file        : ruta al PDB
-    ligand_resname  : nombre del residuo ligando
-    site_cutoff     : radio (Å) para definir el sitio activo
-    ph              : pH para calcular estados de protonación
-    verbose         : imprimir info
+    pdb_file       : path to the PDB structure
+    ligand_resname : residue name of the ligand
+    site_cutoff    : radius (Å) defining the binding site around the ligand
+    ph             : pH for protonation state calculation
+    verbose        : print progress
 
     Returns
     -------
-    Lista de features con 'type', 'coords', 'label', 'source', 'residue'
+    List of features with 'type', 'coords', 'label', 'source', 'residue'
     """
     from Bio.PDB import PDBParser
     import warnings
@@ -68,38 +72,34 @@ def generate_rbp(
 
     parser    = PDBParser(QUIET=True)
     structure = parser.get_structure("mol", pdb_file)
-    model     = structure[0]
+    mdl       = structure[0]
 
-    # Coordenadas del ligando
-    lig_coords = _get_ligand_coords(model, ligand_resname)
+    lig_coords = _get_ligand_coords(mdl, ligand_resname)
     if not lig_coords:
-        print(f"[RBP] ERROR: ligando '{ligand_resname}' no encontrado en {pdb_file}.")
+        print(f"[RBP] ERROR: ligand '{ligand_resname}' not found in {pdb_file}.")
         return []
 
-    _log(f"[RBP] Ligando: {len(lig_coords)} átomos. Cutoff sitio activo: {site_cutoff} Å")
+    _log(f"[RBP] Ligand: {len(lig_coords)} atoms. Binding site cutoff: {site_cutoff} Å")
 
-    # Residuos del sitio activo
-    active_site = _get_active_site_residues(model, lig_coords, site_cutoff)
-    _log(f"[RBP] Sitio activo: {len(active_site)} residuos.")
+    active_site = _binding_site_residues(mdl, lig_coords, site_cutoff)
+    _log(f"[RBP] Binding site: {len(active_site)} residues.")
 
-    # Generar features
     features = []
     for res in active_site:
-        res_features = _residue_to_features(res, ph)
-        features.extend(res_features)
+        features.extend(_residue_features(res, ph))
 
     for f in features:
         f["source"] = "RBP"
 
-    _log(f"[RBP] {len(features)} features RBP generados.")
+    _log(f"[RBP] {len(features)} RBP features generated.")
     return features
 
 
-# ── Helpers internos ──────────────────────────────────────────────────────────
+# ── Internals ─────────────────────────────────────────────────────────────────
 
 def _get_ligand_coords(model, ligand_resname: str) -> List[np.ndarray]:
+    name   = ligand_resname.strip().upper()
     coords = []
-    name = ligand_resname.strip().upper()
     for chain in model:
         for res in chain:
             if res.get_resname().strip() == name:
@@ -108,13 +108,13 @@ def _get_ligand_coords(model, ligand_resname: str) -> List[np.ndarray]:
     return coords
 
 
-def _get_active_site_residues(model, lig_coords, cutoff: float):
-    """Residuos proteicos con al menos un átomo a < cutoff Å del ligando."""
+def _binding_site_residues(model, lig_coords, cutoff: float):
+    """Protein residues with at least one atom within `cutoff` Å of the ligand."""
     lig_arr = np.array(lig_coords)
     active  = []
     for chain in model:
         for res in chain:
-            if res.id[0] != " ":  # ignorar HETATM y agua
+            if res.id[0] != " ":   # skip HETATM and water
                 continue
             for atom in res.get_atoms():
                 ac = atom.get_vector().get_array()
@@ -124,107 +124,88 @@ def _get_active_site_residues(model, lig_coords, cutoff: float):
     return active
 
 
-def _residue_to_features(res, ph: float) -> List[Dict[str, Any]]:
+def _residue_features(res, ph: float) -> List[Dict[str, Any]]:
     """
-    Convierte un residuo en features farmacofóricos según su protonación a pH `ph`.
+    Translate a residue into pharmacophoric features based on its
+    protonation state at pH `ph`.
     """
-    rname  = res.get_resname().strip()
-    resid  = str(res.id[1]) + res.id[2].strip()   # ej. "25A"
-    chain  = res.get_parent().id
+    rname = res.get_resname().strip()
+    resid = str(res.id[1]) + res.id[2].strip()
+    chain = res.get_parent().id
 
-    # Coordenadas del Cα (o del primer átomo si no existe)
-    ca_coord = None
-    for atom in res.get_atoms():
-        if atom.get_name().strip() == "CA":
-            ca_coord = tuple(atom.get_vector().get_array())
-            break
+    # Use Cα as fallback position when specific atoms aren't available
+    ca_coord = _atom_coord(res, ["CA"])
     if ca_coord is None:
         atoms = list(res.get_atoms())
         if not atoms:
             return []
         ca_coord = tuple(atoms[0].get_vector().get_array())
 
-    protonation = _get_protonation_state(rname, resid, ph)
-    features = []
+    prot_state = _protonation_state(rname, resid, ph)
+    features   = []
 
-    # ── Residuos capaces de H-bond ────────────────────────────────────────────
     if rname in ("SER", "THR"):
-        # Hidroxilo: dona Y acepta H
-        oh_coord = _get_atom_coord(res, ["OG", "OG1", "OG2"])
-        c = oh_coord or ca_coord
+        oh = _atom_coord(res, ["OG", "OG1", "OG2"]) or ca_coord
         features += [
-            {"type": "DONOR",    "coords": c, "label": f"{rname}{resid}{chain} OH-dona"},
-            {"type": "ACCEPTOR", "coords": c, "label": f"{rname}{resid}{chain} OH-acepta"},
+            {"type": "DONOR",    "coords": oh, "label": f"{rname}{resid}{chain} OH donor"},
+            {"type": "ACCEPTOR", "coords": oh, "label": f"{rname}{resid}{chain} OH acceptor"},
         ]
 
     elif rname == "ASN":
-        nd2 = _get_atom_coord(res, ["ND2"])
-        od1 = _get_atom_coord(res, ["OD1"])
-        if nd2:
-            features.append({"type": "DONOR",    "coords": nd2, "label": f"ASN{resid}{chain} ND2"})
-        if od1:
-            features.append({"type": "ACCEPTOR", "coords": od1, "label": f"ASN{resid}{chain} OD1"})
+        nd2 = _atom_coord(res, ["ND2"])
+        od1 = _atom_coord(res, ["OD1"])
+        if nd2: features.append({"type": "DONOR",    "coords": nd2, "label": f"ASN{resid}{chain} ND2"})
+        if od1: features.append({"type": "ACCEPTOR", "coords": od1, "label": f"ASN{resid}{chain} OD1"})
 
     elif rname == "GLN":
-        ne2 = _get_atom_coord(res, ["NE2"])
-        oe1 = _get_atom_coord(res, ["OE1"])
-        if ne2:
-            features.append({"type": "DONOR",    "coords": ne2, "label": f"GLN{resid}{chain} NE2"})
-        if oe1:
-            features.append({"type": "ACCEPTOR", "coords": oe1, "label": f"GLN{resid}{chain} OE1"})
+        ne2 = _atom_coord(res, ["NE2"])
+        oe1 = _atom_coord(res, ["OE1"])
+        if ne2: features.append({"type": "DONOR",    "coords": ne2, "label": f"GLN{resid}{chain} NE2"})
+        if oe1: features.append({"type": "ACCEPTOR", "coords": oe1, "label": f"GLN{resid}{chain} OE1"})
 
     elif rname == "TYR":
-        oh_coord = _get_atom_coord(res, ["OH"])
-        c = oh_coord or ca_coord
-        if protonation in (None, "PROTONATED"):
+        oh = _atom_coord(res, ["OH"]) or ca_coord
+        if prot_state in (None, "PROTONATED"):
             features += [
-                {"type": "DONOR",    "coords": c, "label": f"TYR{resid}{chain} OH"},
-                {"type": "ACCEPTOR", "coords": c, "label": f"TYR{resid}{chain} O⁻/OH"},
+                {"type": "DONOR",    "coords": oh, "label": f"TYR{resid}{chain} OH"},
+                {"type": "ACCEPTOR", "coords": oh, "label": f"TYR{resid}{chain} O/OH"},
             ]
         else:
-            features.append({"type": "ACCEPTOR", "coords": c, "label": f"TYR{resid}{chain} O⁻"})
+            features.append({"type": "ACCEPTOR", "coords": oh, "label": f"TYR{resid}{chain} O⁻"})
 
     elif rname in ("ASP", "GLU"):
         o_names = ["OD1", "OD2"] if rname == "ASP" else ["OE1", "OE2"]
-        o_coords = [_get_atom_coord(res, [n]) for n in o_names]
-        o_coords = [c for c in o_coords if c]
-        cg = o_coords[0] if o_coords else ca_coord
-        if protonation == "PROTONATED":
-            # Asp catalítico protonado → dona H
-            features.append({"type": "DONOR",        "coords": cg, "label": f"{rname}{resid}{chain} COOH (protonado)"})
-        elif protonation == "DEPROTONATED":
-            features.append({"type": "NEG_IONIZABLE", "coords": cg, "label": f"{rname}{resid}{chain} COO⁻"})
-            features.append({"type": "ACCEPTOR",      "coords": cg, "label": f"{rname}{resid}{chain} COO⁻ (acepta)"})
+        o_list  = [_atom_coord(res, [n]) for n in o_names]
+        o_list  = [c for c in o_list if c]
+        cg = o_list[0] if o_list else ca_coord
+        if prot_state == "PROTONATED":
+            features.append({"type": "DONOR",         "coords": cg, "label": f"{rname}{resid}{chain} COOH (protonated)"})
         else:
-            # pH 7.4 >> pKa → casi siempre desprotonado
+            # pH 7.4 >> pKa of Asp/Glu → almost always deprotonated
             features.append({"type": "NEG_IONIZABLE", "coords": cg, "label": f"{rname}{resid}{chain} COO⁻"})
-            features.append({"type": "ACCEPTOR",      "coords": cg, "label": f"{rname}{resid}{chain} COO⁻ (acepta)"})
+            features.append({"type": "ACCEPTOR",      "coords": cg, "label": f"{rname}{resid}{chain} COO⁻ acceptor"})
 
-    elif rname in ("LYS",):
-        nz = _get_atom_coord(res, ["NZ"]) or ca_coord
+    elif rname == "LYS":
+        nz = _atom_coord(res, ["NZ"]) or ca_coord
         features += [
             {"type": "POS_IONIZABLE", "coords": nz, "label": f"LYS{resid}{chain} NH3⁺"},
-            {"type": "DONOR",         "coords": nz, "label": f"LYS{resid}{chain} NH3⁺ dona"},
+            {"type": "DONOR",         "coords": nz, "label": f"LYS{resid}{chain} NH3⁺ donor"},
         ]
 
     elif rname == "ARG":
-        cz  = _get_atom_coord(res, ["CZ"]) or ca_coord
+        cz = _atom_coord(res, ["CZ"]) or ca_coord
         features += [
-            {"type": "POS_IONIZABLE", "coords": cz, "label": f"ARG{resid}{chain} guanidinio"},
-            {"type": "DONOR",         "coords": cz, "label": f"ARG{resid}{chain} guanidinio dona"},
+            {"type": "POS_IONIZABLE", "coords": cz, "label": f"ARG{resid}{chain} guanidinium"},
+            {"type": "DONOR",         "coords": cz, "label": f"ARG{resid}{chain} guanidinium donor"},
         ]
 
     elif rname == "HIS":
-        nd1 = _get_atom_coord(res, ["ND1"])
-        ne2 = _get_atom_coord(res, ["NE2"])
-        if protonation == "PROTONATED":
-            # Histidina protonada (HIP): ambos N donan
-            if nd1:
-                features.append({"type": "POS_IONIZABLE", "coords": nd1, "label": f"HIS{resid}{chain} ND1 (HIP)"})
-            if ne2:
-                features.append({"type": "DONOR",         "coords": ne2, "label": f"HIS{resid}{chain} NE2 (HIP)"})
+        nd1 = _atom_coord(res, ["ND1"])
+        ne2 = _atom_coord(res, ["NE2"])
+        if prot_state == "PROTONATED":
+            if nd1: features.append({"type": "POS_IONIZABLE", "coords": nd1, "label": f"HIS{resid}{chain} ND1 (HIP)"})
+            if ne2: features.append({"type": "DONOR",         "coords": ne2, "label": f"HIS{resid}{chain} NE2 (HIP)"})
         else:
-            # HID/HIE neutro
             c = nd1 or ne2 or ca_coord
             features += [
                 {"type": "DONOR",    "coords": c, "label": f"HIS{resid}{chain} N-H"},
@@ -232,8 +213,8 @@ def _residue_to_features(res, ph: float) -> List[Dict[str, Any]]:
             ]
 
     elif rname == "CYS":
-        sg = _get_atom_coord(res, ["SG"]) or ca_coord
-        if protonation == "PROTONATED":
+        sg = _atom_coord(res, ["SG"]) or ca_coord
+        if prot_state == "PROTONATED":
             features += [
                 {"type": "DONOR",    "coords": sg, "label": f"CYS{resid}{chain} SH"},
                 {"type": "ACCEPTOR", "coords": sg, "label": f"CYS{resid}{chain} S:"},
@@ -241,25 +222,23 @@ def _residue_to_features(res, ph: float) -> List[Dict[str, Any]]:
         else:
             features += [
                 {"type": "NEG_IONIZABLE", "coords": sg, "label": f"CYS{resid}{chain} S⁻"},
-                {"type": "ACCEPTOR",      "coords": sg, "label": f"CYS{resid}{chain} S⁻ (acepta)"},
+                {"type": "ACCEPTOR",      "coords": sg, "label": f"CYS{resid}{chain} S⁻ acceptor"},
             ]
 
-    # ── Residuos hidrofóbicos ─────────────────────────────────────────────────
-    elif rname in ("ALA", "VAL", "LEU", "ILE", "PRO", "PHE", "TRP",
-                   "MET", "GLY"):
+    elif rname in ("ALA", "VAL", "LEU", "ILE", "PRO", "PHE", "TRP", "MET", "GLY"):
         features.append({
-            "type": "HYDROPHOBIC",
+            "type"  : "HYDROPHOBIC",
             "coords": ca_coord,
-            "label": f"{rname}{resid}{chain} hidrofóbico",
+            "label" : f"{rname}{resid}{chain} hydrophobic",
         })
 
-    # ── Backbone H-bond (cualquier residuo) ──────────────────────────────────
-    n_coord = _get_atom_coord(res, ["N"])
-    o_coord = _get_atom_coord(res, ["O"])
-    if n_coord and rname != "PRO":  # PRO no tiene H en N
-        features.append({"type": "DONOR",    "coords": n_coord, "label": f"{rname}{resid}{chain} N-H backbone"})
+    # Backbone H-bond capability (applies to all residues)
+    n_coord = _atom_coord(res, ["N"])
+    o_coord = _atom_coord(res, ["O"])
+    if n_coord and rname != "PRO":   # proline has no NH
+        features.append({"type": "DONOR",    "coords": n_coord, "label": f"{rname}{resid}{chain} backbone N-H"})
     if o_coord:
-        features.append({"type": "ACCEPTOR", "coords": o_coord, "label": f"{rname}{resid}{chain} C=O backbone"})
+        features.append({"type": "ACCEPTOR", "coords": o_coord, "label": f"{rname}{resid}{chain} backbone C=O"})
 
     for f in features:
         f["residue"] = f"{rname}{resid}{chain}"
@@ -267,29 +246,22 @@ def _residue_to_features(res, ph: float) -> List[Dict[str, Any]]:
     return features
 
 
-def _get_protonation_state(rname: str, resid: str, ph: float) -> str:
-    """
-    Devuelve 'PROTONATED', 'DEPROTONATED' o None (usar pKa).
-    """
-    key = (rname, resid)
-    if key in SPECIAL_PROTONATION:
-        return SPECIAL_PROTONATION[key]
-    pka = STANDARD_PKA.get(rname)
+def _protonation_state(rname: str, resid: str, ph: float) -> Optional[str]:
+    """Return 'PROTONATED', 'DEPROTONATED', or None (use pKa rule)."""
+    override = _PROTONATION_OVERRIDES.get((rname, resid))
+    if override:
+        return override
+    pka = _STANDARD_PKA.get(rname)
     if pka is None:
         return None
-    # Regla de Henderson-Hasselbalch simplificada:
-    # pH < pKa → protonado; pH > pKa → desprotonado
-    if ph < pka:
-        return "PROTONATED"
-    return "DEPROTONATED"
+    return "PROTONATED" if ph < pka else "DEPROTONATED"
 
 
-def _get_atom_coord(res, names: List[str]):
-    """Devuelve coordenadas del primer átomo encontrado, o None."""
+def _atom_coord(res, names: List[str]) -> Optional[tuple]:
+    """Return the coordinate of the first found atom, or None."""
     for name in names:
         try:
-            atom = res[name]
-            return tuple(atom.get_vector().get_array())
+            return tuple(res[name].get_vector().get_array())
         except KeyError:
             continue
     return None

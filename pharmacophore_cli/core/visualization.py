@@ -1,33 +1,35 @@
 """
-visualization.py — Visualización 3D interactiva con py3Dmol.
+visualization.py — Interactive 3D pharmacophore viewer.
 
-Genera un archivo HTML auto-contenido que puede abrirse en cualquier navegador.
-Incluye la proteína, el ligando, el sitio activo y las esferas farmacofóricas.
+Generates a self-contained HTML file that can be opened in any browser.
+Embeds the protein PDB as base64, renders protein/ligand/active site
+with 3Dmol.js, and overlays pharmacophoric spheres color-coded by type.
 
-Los modelos se renderizan sobre VERSIONES CLUSTERIZADAS de los features
-(nunca sobre los crudos) para evitar superposición de esferas.
+Important: sphere dimensions must be in CSS (width/height on the #viewer
+div with position:relative + overflow:hidden), NOT in createViewer() JS
+arguments — passing dimensions in JS breaks the viewer on some browsers.
 """
 
 import os
 import base64
 from typing import List, Dict, Any, Optional
 
-# ── Paleta de colores por tipo de feature ────────────────────────────────────
+# Color palette per feature type
 COLOR_MAP = {
-    "ACCEPTOR"      : "#FF4444",   # rojo
-    "DONOR"         : "#4488FF",   # azul
-    "HYDROPHOBIC"   : "#FFCC00",   # amarillo
-    "POS_IONIZABLE" : "#FF8800",   # naranja
-    "NEG_IONIZABLE" : "#9370DB",   # violeta
+    "ACCEPTOR"      : "#FF4444",   # red
+    "DONOR"         : "#4488FF",   # blue
+    "HYDROPHOBIC"   : "#FFCC00",   # yellow
+    "POS_IONIZABLE" : "#FF8800",   # orange
+    "NEG_IONIZABLE" : "#9370DB",   # violet
 }
 
-# Estilo por nivel de consenso {weight: {radius, opacity}}
-CONSENSUS_STYLE = {
+# Sphere style per consensus weight level
+_WEIGHT_STYLE = {
     3: {"radius": 1.5, "opacity": 0.95},
     2: {"radius": 1.0, "opacity": 0.70},
     1: {"radius": 0.6, "opacity": 0.40},
 }
-DEFAULT_STYLE = {"radius": 0.9, "opacity": 0.65}
+_DEFAULT_SPHERE_STYLE = {"radius": 0.9, "opacity": 0.65}
 
 
 def generate_html_viewer(
@@ -35,46 +37,39 @@ def generate_html_viewer(
     features_dict: Dict[str, List[Dict[str, Any]]],
     output_html: str,
     ligand_resname: str = "RIT",
-    title: str = "Farmacóforo",
+    title: str = "Pharmacophore",
     active_site_residues: Optional[List[str]] = None,
     width: int = 900,
     height: int = 600,
 ) -> str:
     """
-    Genera un HTML con visualización 3D interactiva usando py3Dmol embebido.
+    Generate an interactive 3D HTML viewer using embedded 3Dmol.js.
 
     Parameters
     ----------
-    pdb_file            : ruta al PDB de la proteína
-    features_dict       : dict {nombre_modelo → lista_de_features}
-                          Ej: {'SBP': [...], 'LBP': [...], 'Consenso': [...]}
-                          Cada lista debe estar PRE-CLUSTERIZADA.
-    output_html         : archivo HTML de salida
-    ligand_resname      : residuo del ligando en el PDB
-    title               : título del visor
-    active_site_residues: lista de 'ResnameResidChain' para destacar (ej. ['ASP25A'])
-    width, height       : dimensiones del visor
+    pdb_file             : protein PDB (embedded as base64 in the HTML)
+    features_dict        : {model_name: [feature_list]} — each list must be
+                           pre-clustered before calling this function
+    output_html          : output path
+    ligand_resname       : residue name of the ligand in the PDB
+    title                : viewer title
+    active_site_residues : list of 'ResnameResidChain' strings to highlight
+    width, height        : viewer dimensions in pixels
 
     Returns
     -------
-    Ruta del archivo HTML generado.
+    Path to the generated HTML file.
     """
-    # Leer PDB como texto y encodear en base64 para embedir en HTML
     with open(pdb_file) as fh:
         pdb_text = fh.read()
     pdb_b64 = base64.b64encode(pdb_text.encode()).decode()
 
-    # Construir datos de esferas por modelo
-    spheres_js = _build_spheres_js(features_dict)
-
-    # Construir leyenda HTML
-    legend_html = _build_legend_html(features_dict)
-
-    # Construir checkboxes para activar/desactivar modelos
-    checkboxes_html = _build_checkboxes(features_dict)
+    spheres_js    = _spheres_to_js(features_dict)
+    legend_html   = _build_legend(features_dict)
+    checkboxes    = _build_checkboxes(features_dict)
 
     html = f"""<!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>{title}</title>
@@ -164,45 +159,41 @@ def generate_html_viewer(
 <div id="container">
   <h1>🔬 {title}</h1>
   <div class="subtitle">
-    Farmacóforo 3D interactivo — rota con clic izquierdo, zoom con rueda, traslada con clic derecho
+    Interactive 3D pharmacophore — left-click to rotate · scroll to zoom · right-click to translate
   </div>
 
   {legend_html}
 
   <div class="controls">
     <div class="ctrl-group">
-      <b>Proteína:</b>
+      <b>Protein:</b>
       <label><input type="checkbox" id="chk_protein" checked onchange="toggleProtein()"> cartoon</label>
     </div>
     <div class="ctrl-group">
-      <b>Ligando:</b>
+      <b>Ligand:</b>
       <label><input type="checkbox" id="chk_ligand" checked onchange="toggleLigand()"> sticks</label>
     </div>
     <div class="ctrl-group">
-      <b>Sitio activo:</b>
-      <label><input type="checkbox" id="chk_site" checked onchange="toggleSite()"> sticks magenta</label>
+      <b>Binding site:</b>
+      <label><input type="checkbox" id="chk_site" checked onchange="toggleSite()"> sticks (magenta)</label>
     </div>
     <div class="ctrl-group">
-      <b>Modelos:</b>
-      {checkboxes_html}
+      <b>Models:</b>
+      {checkboxes}
     </div>
   </div>
 
   <div id="viewer"></div>
-  {_build_stats_html(features_dict)}
+  {_build_stats(features_dict)}
 </div>
 
 <script>
-// ── PDB embebido ─────────────────────────────────────────────
-const pdb_b64 = "{pdb_b64}";
+const pdb_b64  = "{pdb_b64}";
 const pdb_text = atob(pdb_b64);
 
-// ── Datos de esferas ─────────────────────────────────────────
 {spheres_js}
 
-// ── Viewer global ────────────────────────────────────────────
 let viewer = null;
-let modelAdded = false;
 
 function initViewer() {{
   viewer = $3Dmol.createViewer("viewer", {{
@@ -211,19 +202,16 @@ function initViewer() {{
 
   viewer.addModel(pdb_text, "pdb");
 
-  // Proteína (cartoon gris)
+  // Protein cartoon
   viewer.setStyle({{}}, {{cartoon: {{color: "#cccccc", opacity: 0.5}}}});
 
-  // Ligando (sticks blancos/elementales)
+  // Ligand sticks
   viewer.setStyle(
     {{resn: "{ligand_resname}"}},
     {{stick: {{colorscheme: "elementWithCarbon", radius: 0.15}}}}
   );
 
-  // Sitio activo (sticks magenta, si se especificaron)
   renderSite();
-
-  // Esferas farmacofóricas
   renderSpheres();
 
   viewer.zoomTo({{resn: "{ligand_resname}"}});
@@ -231,19 +219,15 @@ function initViewer() {{
 }}
 
 function renderSite() {{
-  const siteRes = {_js_list(active_site_residues or [])};
+  const siteRes = {_js_array(active_site_residues or [])};
   if (!siteRes.length) return;
   siteRes.forEach(function(r) {{
     const rnum = parseInt(r.match(/\\d+/)[0]);
-    viewer.setStyle(
-      {{resi: rnum}},
-      {{stick: {{color: "magenta", radius: 0.12}}}}
-    );
+    viewer.setStyle({{resi: rnum}}, {{stick: {{color: "magenta", radius: 0.12}}}});
   }});
 }}
 
 function renderSpheres() {{
-  // Limpiar esferas existentes
   viewer.removeAllShapes();
   renderSite();
 
@@ -293,23 +277,20 @@ window.onload = initViewer;
     return output_html
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── HTML/JS helpers ───────────────────────────────────────────────────────────
 
-def _build_spheres_js(features_dict: Dict[str, List[Dict]]) -> str:
-    """Genera el objeto JavaScript PHARMACOPHORE_DATA con todas las esferas."""
+def _spheres_to_js(features_dict: Dict[str, List[Dict]]) -> str:
+    """Build the PHARMACOPHORE_DATA JavaScript object."""
     lines = ["const PHARMACOPHORE_DATA = {"]
     for name, features in features_dict.items():
-        lines.append(f"  {json_key(name)}: [")
+        key = _safe_js_key(name)
+        lines.append(f"  {key}: [")
         for f in features:
             x, y, z = [float(c) for c in f["coords"]]
             color   = COLOR_MAP.get(f["type"], "#00FF00")
             weight  = f.get("weight")
-            if weight is not None:
-                style = CONSENSUS_STYLE.get(weight, DEFAULT_STYLE)
-            else:
-                style = DEFAULT_STYLE
-            r = style["radius"]
-            o = style["opacity"]
+            style   = _WEIGHT_STYLE.get(weight, _DEFAULT_SPHERE_STYLE) if weight else _DEFAULT_SPHERE_STYLE
+            r, o    = style["radius"], style["opacity"]
             lines.append(
                 f"    {{x:{x:.3f}, y:{y:.3f}, z:{z:.3f}, "
                 f'radius:{r}, color:"{color}", opacity:{o}}},'
@@ -319,53 +300,46 @@ def _build_spheres_js(features_dict: Dict[str, List[Dict]]) -> str:
     return "\n".join(lines)
 
 
-def _build_legend_html(features_dict: Dict[str, List[Dict]]) -> str:
-    items = []
-    for ftype, color in COLOR_MAP.items():
-        items.append(
-            f'<div class="leg-item">'
-            f'<span class="leg-dot" style="background:{color}"></span>'
-            f'{ftype.replace("_"," ").title()}</div>'
-        )
-    # Añadir leyenda de tamaño para consenso
+def _build_legend(features_dict: Dict[str, List[Dict]]) -> str:
+    items = [
+        f'<div class="leg-item">'
+        f'<span class="leg-dot" style="background:{color}"></span>'
+        f'{ftype.replace("_", " ").title()}</div>'
+        for ftype, color in COLOR_MAP.items()
+    ]
     if any("weight" in f for feats in features_dict.values() for f in feats):
         items.append(
-            '<div class="leg-item">|&nbsp;<b>Tamaño</b>: '
-            '★★★ grande=triple &nbsp;★★☆ medio=doble &nbsp;★☆☆ pequeño=único</div>'
+            '<div class="leg-item">|&nbsp;<b>Size</b>: '
+            '★★★ large=triple &nbsp;★★☆ medium=double &nbsp;★☆☆ small=single</div>'
         )
     return '<div class="legend">' + "".join(items) + "</div>"
 
 
 def _build_checkboxes(features_dict: Dict[str, List[Dict]]) -> str:
-    parts = []
-    for name in features_dict:
-        safe = name.replace(" ", "_")
-        parts.append(
-            f'<label><input type="checkbox" id="chk_{safe}" checked '
-            f'onchange="renderSpheres()"> {name}</label>'
-        )
-    return " ".join(parts)
+    return " ".join(
+        f'<label><input type="checkbox" id="chk_{name.replace(" ", "_")}" checked '
+        f'onchange="renderSpheres()"> {name}</label>'
+        for name in features_dict
+    )
 
 
-def _build_stats_html(features_dict: Dict[str, List[Dict]]) -> str:
+def _build_stats(features_dict: Dict[str, List[Dict]]) -> str:
     from collections import Counter
-    parts = []
+    rows = []
     for name, features in features_dict.items():
-        cnt = Counter(f["type"] for f in features)
+        cnt   = Counter(f["type"] for f in features)
         total = len(features)
-        row = f"<b>{name}</b> ({total} total) — " + " | ".join(
+        row   = f"<b>{name}</b> ({total} total) — " + " | ".join(
             f"{t}: {n}" for t, n in sorted(cnt.items())
         )
-        parts.append(f"<div>{row}</div>")
-    return '<div class="stats">' + "\n".join(parts) + "</div>"
+        rows.append(f"<div>{row}</div>")
+    return '<div class="stats">' + "\n".join(rows) + "</div>"
 
 
-def _js_list(lst) -> str:
-    quoted = ", ".join(f'"{item}"' for item in lst)
-    return f"[{quoted}]"
+def _js_array(lst) -> str:
+    return "[" + ", ".join(f'"{item}"' for item in lst) + "]"
 
 
-def json_key(s: str) -> str:
-    """Convierte nombre de modelo a clave JS válida."""
-    s = s.replace(" ", "_").replace("-", "_")
-    return f'"{s}"'
+def _safe_js_key(s: str) -> str:
+    """Turn a model name into a quoted JS object key."""
+    return '"' + s.replace(" ", "_").replace("-", "_") + '"'
