@@ -43,3 +43,4 @@ Thumbs.db
 .vscode/
 .idea/
 *.sublime-project
+tests/_tmp/

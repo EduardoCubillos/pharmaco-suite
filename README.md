@@ -308,6 +308,22 @@ vina --receptor 1HXW.pdbqt \
 
 ---
 
+## Tests
+
+```bash
+python tests/run_all.py
+```
+
+Six tests, each pinning down one claim the code makes about itself: that the
+LBP reaches receptor space, that the 3D fit is invariant to the frame, that
+RBP hydrophobic features sit on side chains, that H-bond roles are not guessed
+from the element, that the structural alerts behave like PAINS, and that
+caller-supplied filters bind. They need no network and no reference data —
+every structure is built with RDKit on the spot — and the whole set runs in a
+couple of seconds. See [tests/README.md](tests/README.md).
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE). If you use this in published work, a citation to
