@@ -7,12 +7,14 @@ Calcula y filtra por:
   - SA Score — Synthetic Accessibility
   - PSA — Polar Surface Area
   - LogP
-  - Alertas estructurales (PAINS básicos)
+  - Alertas estructurales (catálogos PAINS/BRENK/NIH de RDKit)
 
 Referencias:
   - Lipinski et al. (2001) Adv. Drug Deliv. Rev. 46, 3–26
   - Bickerton et al. (2012) Nature Chemistry 4, 90–98
   - Ertl & Schuffenhauer (2009) J. Cheminform. 1, 8
+  - Baell & Holloway (2010) J. Med. Chem. 53, 2719–2740 (PAINS)
+  - Brenk et al. (2008) ChemMedChem 3, 435–444
 """
 
 import os
@@ -31,19 +33,32 @@ DEFAULT_FILTERS = {
     "qed_min"    : 0.30,
     "sa_max"     : 5.0,    # 1=fácil, 10=difícil; ≤5 es accesible
     "lip_violations_max": 1,   # tolerancia de 1 violación Ro5
+    # Catálogos que descartan la molécula. PAINS son los agregadores y
+    # promiscuos de Baell & Holloway; BRENK y NIH son más agresivos y se
+    # reportan por separado sin descartar, para no perder quimiotipos
+    # perfectamente válidos.
+    "reject_catalogs": ("PAINS",),
+    "report_catalogs": ("BRENK", "NIH"),
 }
 
 
-def compute_admet(mol) -> Dict[str, Any]:
+def compute_admet(mol, filters: Dict = None) -> Dict[str, Any]:
     """
     Calcula todos los descriptores ADMET para una molécula.
     Devuelve dict con métricas y un flag 'passes' global.
+
+    `filters` sobreescribe DEFAULT_FILTERS. Si se omite, se usan los
+    defaults — pero quien pase filtros propios los verá aplicados tanto a
+    los umbrales numéricos como a los catálogos de alertas, que antes
+    quedaban fijos en los defaults aunque el llamador pidiera otra cosa.
     """
     from rdkit.Chem import Descriptors, QED as QEDmod, rdMolDescriptors, RDConfig
     from rdkit import Chem
 
     if mol is None:
         return {"passes": False, "error": "mol_none"}
+
+    active = {**DEFAULT_FILTERS, **(filters or {})}
 
     mw      = Descriptors.MolWt(mol)
     logp    = Descriptors.MolLogP(mol)
@@ -66,8 +81,9 @@ def compute_admet(mol) -> Dict[str, Any]:
     # Lipinski violations
     lip_v = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
 
-    # Alertas PAINS básicas (substrings peligrosos)
-    alerts = _check_structural_alerts(mol)
+    # Alertas estructurales: catálogos curados de RDKit
+    alerts      = _check_structural_alerts(mol, active.get("reject_catalogs", ()))
+    alerts_info = _check_structural_alerts(mol, active.get("report_catalogs", ()))
 
     result = {
         "mw"          : round(mw, 2),
@@ -82,10 +98,11 @@ def compute_admet(mol) -> Dict[str, Any]:
         "sa_score"    : round(sa, 2) if sa else None,
         "lip_violations": lip_v,
         "alerts"      : alerts,
+        "alerts_info" : alerts_info,
         "passes"      : False,   # se asignará abajo
     }
 
-    result["passes"] = _passes_filters(result, DEFAULT_FILTERS)
+    result["passes"] = _passes_filters(result, active)
     return result
 
 
@@ -115,12 +132,8 @@ def filter_molecules(
             n_invalid += 1
             continue
         canon = Chem.MolToSmiles(mol)
-        admet = compute_admet(mol)
+        admet = compute_admet(mol, active_filters)
         admet["smiles"] = canon
-        try:
-            admet["passes"] = _passes_filters(admet, active_filters)
-        except Exception:
-            admet["passes"] = False
         results.append(admet)
 
     passing  = [r for r in results if r.get("passes")]
@@ -191,31 +204,56 @@ def _compute_sa(mol) -> Optional[float]:
         return None
 
 
-# PAINS básicos como SMARTS (subconjunto de filtros conocidos)
-_ALERT_SMARTS = [
-    "[#6]-[NH]-[NH]-[#6]",                  # hidrazina
-    "c1ccc(cc1)-[NH]-c1ccccc1",             # diarilamin
-    "[O;X2]-[N;X2]=O",                      # nitrosoamina
-    "[S;X2]-[S;X2]",                        # disulfuro reactivo
-    "[#6][C@@H]([NH2])C(=O)",               # alfa-amino activo
-    "[nH]1cccc1",                           # pirrol libre (reactividad)
-]
+# ── Alertas estructurales ─────────────────────────────────────────────────────
+#
+# Los catálogos vienen de RDKit (FilterCatalog), no escritos a mano. Los seis
+# SMARTS que había antes se llamaban PAINS sin serlo: una quinona para-
+# sustituida, que es el quimiotipo PAINS de manual, no activaba ninguno de los
+# seis, mientras que un pirrol libre — presente en quimiotipos perfectamente
+# viables — descartaba la molécula de inmediato. El patrón alfa-amino además
+# estaba escrito estereoespecífico ([C@@H]) sin efecto alguno, porque
+# HasSubstructMatch ignora la quiralidad salvo que se pida explícitamente.
 
-_compiled_alerts = None
+_catalog_cache: Dict[tuple, Any] = {}
 
-def _check_structural_alerts(mol) -> List[str]:
-    """Devuelve lista de alertas detectadas (vacía si ninguna)."""
-    from rdkit import Chem
-    global _compiled_alerts
-    if _compiled_alerts is None:
-        _compiled_alerts = []
-        for sma in _ALERT_SMARTS:
-            p = Chem.MolFromSmarts(sma)
-            if p:
-                _compiled_alerts.append((sma, p))
 
-    alerts = []
-    for sma, patt in _compiled_alerts:
-        if mol.HasSubstructMatch(patt):
-            alerts.append(sma)
-    return alerts
+def _get_catalog(names: tuple):
+    """FilterCatalog para los catálogos pedidos; se construye una sola vez."""
+    from rdkit.Chem import FilterCatalog
+    from rdkit.Chem.FilterCatalog import FilterCatalogParams
+
+    key = tuple(sorted(names))
+    if key in _catalog_cache:
+        return _catalog_cache[key]
+
+    params = FilterCatalogParams()
+    for name in key:
+        entry = getattr(FilterCatalogParams.FilterCatalogs, name.upper(), None)
+        if entry is None:
+            print(f"[ADMET] Catálogo desconocido, ignorado: {name}", file=sys.stderr)
+            continue
+        params.AddCatalog(entry)
+    catalog = FilterCatalog.FilterCatalog(params)
+    _catalog_cache[key] = catalog
+    return catalog
+
+
+def _check_structural_alerts(mol, catalogs: tuple = ("PAINS",)) -> List[str]:
+    """
+    Devuelve los nombres de las alertas encontradas (vacío si ninguna).
+    Los nombres son los de RDKit, así que se pueden rastrear hasta la
+    publicación original del filtro.
+    """
+    if mol is None or not catalogs:
+        return []
+    try:
+        catalog = _get_catalog(tuple(catalogs))
+    except Exception as e:
+        print(f"[ADMET] FilterCatalog no disponible ({e}); sin alertas.",
+              file=sys.stderr)
+        return []
+
+    try:
+        return sorted({m.GetDescription() for m in catalog.GetMatches(mol)})
+    except Exception:
+        return []
