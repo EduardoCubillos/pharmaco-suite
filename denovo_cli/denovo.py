@@ -144,22 +144,29 @@ def cmd_run(args):
     if not candidates:
         sys.exit("ERROR: No valid molecules generated. Try increasing --pop-size or --n-gen.")
 
-    # Optional 3D pharmacophore scoring
+    # Optional 3D pharmacophore fit
     if pdb_features:
         from core.pharma_scorer import score_against_pdb_pharmacophore
         from rdkit import Chem
-        from rdkit.Chem import AllChem
-        print(f"\n  Computing 3D pharmacophore score against PDB model...")
+        print(f"\n  Fitting candidates to the pharmacophore model "
+              f"(tolerance {args.fit_tolerance} Å)...")
+        n_fit = 0
         for cand in candidates:
             mol = Chem.MolFromSmiles(cand["smiles"])
-            if mol:
-                mol3d = Chem.AddHs(mol)
-                if AllChem.EmbedMolecule(mol3d, AllChem.ETKDGv3()) == 0:
-                    AllChem.MMFFOptimizeMolecule(mol3d)
-                    mol3d = Chem.RemoveHs(mol3d)
-                    cand["pharma_score_3d"] = round(
-                        score_against_pdb_pharmacophore(mol3d, pdb_features), 3
-                    )
+            if mol is None:
+                continue
+            score, info = score_against_pdb_pharmacophore(
+                mol, pdb_features,
+                tolerance=args.fit_tolerance,
+                return_details=True,
+            )
+            cand["pharma_score_3d"] = round(score, 3)
+            cand["fit_points"]      = f"{info['n_points_fitted']}/{info['n_points_total']}"
+            cand["fit_rmsd"]        = info["fit_rmsd"]
+            if score > 0:
+                n_fit += 1
+        print(f"  {n_fit}/{len(candidates)} candidates fit at least "
+              f"3 pharmacophore points.")
 
     print(f"\n  {GREEN}✓{RESET} {len(candidates)} molecules generated.")
 
@@ -298,6 +305,10 @@ def build_parser():
     p_run.add_argument("--activity-cutoff", dest="activity_cutoff", type=float, default=10000, metavar="nM")
     p_run.add_argument("--pharmacophore", metavar="PDB",
                        help="Pharmacophore PDB (from pharmacophore_cli) for additional 3D scoring")
+    p_run.add_argument("--fit-tolerance", dest="fit_tolerance", type=float,
+                       default=1.5, metavar="A",
+                       help="Slack (Å) on every pharmacophore point-point "
+                            "distance when fitting candidates (default: 1.5)")
     p_run.add_argument("--outdir", default="denovo_results", metavar="DIR")
     p_run.add_argument("--prefix", default="candidates", metavar="PREFIX")
     ga = p_run.add_argument_group("Genetic Algorithm")

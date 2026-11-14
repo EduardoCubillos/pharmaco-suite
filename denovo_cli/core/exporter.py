@@ -138,6 +138,10 @@ def _write_csv(candidates: List[Dict], path: str):
     import csv
     fields = ["rank", "smiles", "score", "pharma_score", "qed", "sa_score",
               "mw", "logp", "psa", "hbd", "hba", "rot_bonds", "lip_violations"]
+    # 3D fit columns only exist when a pharmacophore model was supplied
+    for extra in ("pharma_score_3d", "fit_points", "fit_rmsd"):
+        if any(extra in c for c in candidates):
+            fields.append(extra)
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
