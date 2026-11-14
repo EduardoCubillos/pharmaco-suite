@@ -77,6 +77,21 @@ def build_consensus(
     lbp_tagged = [{**f, "source": "LBP"} for f in lbp]
     rbp_tagged = [{**f, "source": "RBP"} for f in rbp]
 
+    # SBP and RBP coordinates come straight from the crystal structure, so they
+    # are in receptor space by construction. LBP coordinates are only in
+    # receptor space if the conformer was successfully superimposed onto the
+    # crystal ligand. Fusing an unaligned LBP with the other two models would
+    # compare positions in two unrelated frames and silently invent agreement,
+    # so those features are dropped here instead.
+    unaligned = [f for f in lbp_tagged if f.get("frame", "receptor") != "receptor"]
+    if unaligned:
+        lbp_tagged = [f for f in lbp_tagged if f.get("frame", "receptor") == "receptor"]
+        _log(f"\n[consensus] WARNING: {len(unaligned)} LBP features discarded — "
+             "their coordinates are not in receptor space (alignment to the "
+             "crystal ligand failed or was not requested).")
+        _log("[consensus] The consensus below is built from SBP and RBP only. "
+             "Check --ligand-resname and the SMILES you supplied.")
+
     ligand_pool = sbp_tagged + lbp_tagged
     result = []
     used = set()
