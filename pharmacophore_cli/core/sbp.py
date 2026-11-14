@@ -25,6 +25,7 @@ _HBOND_CUTOFF   = 3.5   # Å  donor-acceptor distance
 _HYDROPH_CUTOFF = 4.0   # Å  carbon-carbon contact
 _HBOND_ATOMS    = {"N", "O"}
 _HYDROPH_ELEMS  = {"C", "S"}
+_XH_BOND_MAX    = 1.3   # Å  — longest N-H / O-H treated as covalent
 
 
 def generate_sbp(
@@ -386,38 +387,77 @@ def _biopython_fallback(
     if verbose:
         print(f"[SBP] Ligand '{ligand_resname}': {len(lig_atoms)} atoms | Protein: {len(prot_atoms)} atoms")
 
-    features   = []
-    seen_coords: set = set()
+    from Bio.PDB import NeighborSearch
+
+    features = []
+    search   = NeighborSearch(prot_atoms)
+
+    # Can the ligand's own hydrogens be used to tell donors from acceptors?
+    lig_hydrogens = [a for a in lig_atoms
+                     if (a.element or a.get_name().strip()[:1]).strip().upper() == "H"]
+    if verbose and not lig_hydrogens:
+        print("[SBP] Note: the ligand carries no explicit hydrogens, so this "
+              "fallback cannot tell a donor from an acceptor. Polar contacts "
+              "are reported as both roles; install PLIP for a resolved "
+              "assignment.")
 
     for la in lig_atoms:
-        la_elem  = (la.element or la.get_name()[0]).strip()
+        la_elem  = (la.element or la.get_name().strip()[:1]).strip().upper()
         la_coord = tuple(np.round(la.get_vector().get_array(), 3))
 
-        for pa in prot_atoms:
-            pa_elem = (pa.element or pa.get_name()[0]).strip()
-            dist    = la - pa   # BioPython __sub__ returns distance
+        if la_elem in _HBOND_ATOMS:
+            partners = [pa for pa in search.search(la.coord, _HBOND_CUTOFF)
+                        if (pa.element or pa.get_name().strip()[:1]).strip().upper()
+                        in _HBOND_ATOMS]
+            if partners:
+                d = min(float(la - pa) for pa in partners)
+                for ftype in _hbond_roles(la, lig_hydrogens):
+                    features.append({
+                        "type"  : ftype,
+                        "coords": la_coord,
+                        "label" : f"{ftype} (fallback, {la.get_name().strip()}, "
+                                  f"d={d:.2f}Å)",
+                    })
 
-            if (dist <= _HBOND_CUTOFF
-                    and la_elem in _HBOND_ATOMS
-                    and pa_elem in _HBOND_ATOMS
-                    and la_coord not in seen_coords):
-                ftype = "DONOR" if la_elem == "N" else "ACCEPTOR"
-                features.append({
-                    "type"  : ftype,
-                    "coords": la_coord,
-                    "label" : f"{ftype} (fallback, d={dist:.2f}Å)",
-                })
-                seen_coords.add(la_coord)
-
-            if (dist <= _HYDROPH_CUTOFF
-                    and la_elem in _HYDROPH_ELEMS
-                    and pa_elem in _HYDROPH_ELEMS
-                    and la_coord not in seen_coords):
+        elif la_elem in _HYDROPH_ELEMS:
+            partners = [pa for pa in search.search(la.coord, _HYDROPH_CUTOFF)
+                        if (pa.element or pa.get_name().strip()[:1]).strip().upper()
+                        in _HYDROPH_ELEMS]
+            if partners:
+                d = min(float(la - pa) for pa in partners)
                 features.append({
                     "type"  : "HYDROPHOBIC",
                     "coords": la_coord,
-                    "label" : f"Hydrophobic (fallback, d={dist:.2f}Å)",
+                    "label" : f"Hydrophobic (fallback, {la.get_name().strip()}, "
+                              f"d={d:.2f}Å)",
                 })
-                seen_coords.add(la_coord)
 
     return features
+
+
+def _hbond_roles(atom, lig_hydrogens: list) -> List[str]:
+    """
+    Which H-bond roles a polar ligand atom can play.
+
+    Element alone does not decide this: a pyridine nitrogen and a tertiary
+    amine accept and cannot donate, a hydroxyl oxygen does both, and a
+    carbonyl oxygen only accepts. When the structure carries explicit
+    hydrogens the question is settled by looking for one covalently bound to
+    the atom. When it does not — the common case for a crystal structure —
+    both roles are returned, which keeps the ambiguity visible instead of
+    resolving it by a coin flip on the element.
+    """
+    if not lig_hydrogens:
+        return ["DONOR", "ACCEPTOR"]
+
+    centre = atom.get_vector().get_array()
+    has_h = any(
+        float(np.linalg.norm(h.get_vector().get_array() - centre)) <= _XH_BOND_MAX
+        for h in lig_hydrogens
+    )
+    elem = (atom.element or atom.get_name().strip()[:1]).strip().upper()
+    if has_h:
+        # An N-H or O-H donates; an oxygen with a hydrogen (hydroxyl, water)
+        # still has a lone pair and accepts as well.
+        return ["DONOR", "ACCEPTOR"] if elem == "O" else ["DONOR"]
+    return ["ACCEPTOR"]
