@@ -14,7 +14,9 @@ is accepted only if its RMSD falls below `max_align_rmsd`. Features carry
 a `frame` field ('receptor' or 'ligand') so that downstream consensus
 never fuses coordinates expressed in different reference frames.
 
-Reference: RDKit BaseFeatures.fdef — Riniker & Landrum (2015).
+Feature definitions come from the BaseFeatures.fdef file shipped with RDKit.
+Conformers are generated with ETKDGv3:
+  - Riniker & Landrum (2015) J. Chem. Inf. Model. 55, 2562–2574
 """
 
 import numpy as np

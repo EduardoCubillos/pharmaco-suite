@@ -2,22 +2,24 @@
 clustering.py — Pharmacophoric feature clustering.
 
 Groups nearby features of the same type into a single centroid.
-Uses type-specific radii from literature, since hydrogen bonds are
-directional (tight radius ~1.5 Å) while hydrophobics are not (~2.5 Å).
-Collapsing everything to a single radius over-merges H-bonds and
-under-merges hydrophobic contacts.
 
-References:
-  - Wolber & Langer (2005) J. Chem. Inf. Model. 45, 160–169
-  - Günther et al. (2008) J. Chem. Inf. Model. 48, 2022–2039
-  - Dixon et al. (2006) J. Comput.-Aided Mol. Des. 20, 647–671
+The radii below are type-specific rather than uniform, because a hydrogen
+bond is directional and tolerates little positional slack while a
+hydrophobic contact is diffuse and tolerates several ångström. A single
+radius for both over-merges H-bonds and under-merges hydrophobic contacts.
+The specific values are defaults of this tool, not numbers taken from any
+published method, and they are meant to be overridden per run from the CLI.
+
+Background on how pharmacophore tools define feature tolerances:
+  - Wolber & Langer (2005) J. Chem. Inf. Model. 45, 160–169 — LigandScout
+  - Dixon et al. (2006) J. Comput.-Aided Mol. Des. 20, 647–671 — PHASE
 """
 
 import numpy as np
 from collections import defaultdict
 from typing import List, Dict, Any
 
-# Default clustering radii per feature type (Å)
+# Default clustering radii per feature type (Å) — this tool's own defaults
 CLUSTER_RADII: Dict[str, float] = {
     "DONOR"         : 1.5,   # directional — tight
     "ACCEPTOR"      : 1.5,   # directional — tight
