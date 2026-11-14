@@ -220,6 +220,27 @@ Diversity filter (Tanimoto < 0.85 between candidates)
 Top N candidates → 3D SDF + PDBQT (if Meeko installed) + CSV metrics
 ```
 
+### How the 3D pharmacophore fit is scored
+
+With `--pharmacophore`, each candidate is scored on how much of the model it
+can satisfy at once. The model lives in the receptor's coordinate frame and a
+generated candidate lives in whatever frame its embedding produced, so the two
+cannot be compared where they stand. The candidate is aligned onto the model
+first: a conformer ensemble is generated, superpositions are proposed from
+anchors whose internal distances agree with the model's, and under each
+superposition every model point is matched to the nearest unused feature of its
+own type inside the tolerance sphere.
+
+The score is the best weighted coverage over the ensemble, so it depends only
+on internal geometry and is invariant to rotating or translating either input.
+Partial matches count as such: three results columns report the score, how many
+points were matched out of how many, and the fit RMSD over the matched points.
+
+```
+pharma_score_3d,fit_points,fit_rmsd
+0.875,4/5,0.879
+```
+
 ### Subcommands
 
 | Subcommand | Description |
@@ -240,6 +261,7 @@ Top N candidates → 3D SDF + PDBQT (if Meeko installed) + CSV metrics
 | `--pop-size` | 60 | GA population size |
 | `--n-gen` | 50 | GA generations |
 | `--diversity` | 0.85 | Max Tanimoto similarity between final candidates |
+| `--fit-tolerance` | 1.5 | Tolerance sphere radius (Å) when fitting candidates to the pharmacophore |
 
 ### Output files
 
@@ -286,14 +308,26 @@ vina --receptor 1HXW.pdbqt \
 
 ---
 
+## License
+
+MIT — see [LICENSE](LICENSE). If you use this in published work, a citation to
+the repository is appreciated.
+
+---
+
 ## References
 
-- Wolber & Langer (2005) *J. Chem. Inf. Model.* 45, 160–169 — pharmacophore clustering radii
-- Baroni et al. (2007) *J. Chem. Inf. Model.* 47, 279–294 — weighted consensus (PHASE)
-- Sanders et al. (2012) *J. Chem. Inf. Model.* 52, 1261–1272 — consensus model validation
+- Wolber & Langer (2005) *J. Chem. Inf. Model.* 45, 160–169 — LigandScout
+- Wolber, Dornhofer & Langer (2006) *J. Comput.-Aided Mol. Des.* 20, 773–788 — overlay of small molecules onto 3D pharmacophores
+- Dixon et al. (2006) *J. Comput.-Aided Mol. Des.* 20, 647–671 — PHASE
+- Baroni et al. (2007) *J. Chem. Inf. Model.* 47, 279–294 — FLAP, a common reference frame for proteins and ligands
+- Sanders et al. (2012) *J. Chem. Inf. Model.* 52, 1607–1620 — comparison of pharmacophore screening tools
+- Koes & Camacho (2011) *J. Chem. Inf. Model.* 51, 1307–1314 — Pharmer
 - Salentin et al. (2015) *Nucleic Acids Res.* 43, W443–W447 — PLIP
-- Riniker & Landrum (2015) *J. Chem. Inf. Model.* 55, 2562–2574 — RDKit pharmacophore features
+- Riniker & Landrum (2015) *J. Chem. Inf. Model.* 55, 2562–2574 — ETKDG conformer generation
 - Sliwoski et al. (2014) *Pharmacol. Rev.* 66, 334–395 — receptor-based pharmacophores
+- Baell & Holloway (2010) *J. Med. Chem.* 53, 2719–2740 — PAINS
+- Brenk et al. (2008) *ChemMedChem* 3, 435–444 — structural alerts
 - Krenn et al. (2020) *Mach. Learn.: Sci. Technol.* 1, 045024 — SELFIES
 - Lipinski et al. (2001) *Adv. Drug Deliv. Rev.* 46, 3–26 — Rule of Five
 - Bickerton et al. (2012) *Nature Chemistry* 4, 90–98 — QED
