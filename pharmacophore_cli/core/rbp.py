@@ -31,11 +31,24 @@ _STANDARD_PKA: Dict[str, float] = {
     "ARG": 12.5,
 }
 
-# Hard overrides for known catalytic residues (ignores pKa-based calculation)
-# HIV-1 protease: the catalytic dyad is monoprotonated — Asp25A donates, Asp25B accepts
-_PROTONATION_OVERRIDES: Dict[Tuple[str, str], str] = {
-    ("ASP", "25A"): "PROTONATED",
-    ("ASP", "25B"): "DEPROTONATED",
+# Hard overrides for known catalytic residues (ignores pKa-based calculation).
+# HIV-1 protease: the catalytic dyad is monoprotonated — Asp25 of chain A
+# donates, Asp25 of chain B accepts.
+# Keyed by (resname, residue number, chain id). The chain matters: the two
+# halves of the dyad are the same residue number in different chains, so a
+# key without the chain cannot distinguish them.
+_PROTONATION_OVERRIDES: Dict[Tuple[str, int, str], str] = {
+    ("ASP", 25, "A"): "PROTONATED",
+    ("ASP", 25, "B"): "DEPROTONATED",
+}
+
+# Backbone atoms, excluded when locating a side chain
+_BACKBONE = {"N", "CA", "C", "O", "OXT"}
+
+# Rings whose centroid is the right place for an aromatic hydrophobic feature
+_RING_ATOMS: Dict[str, List[str]] = {
+    "PHE": ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
+    "TRP": ["CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2"],   # benzo ring of indole
 }
 
 _BINDING_SITE_CUTOFF = 6.0   # Å from any ligand atom
@@ -129,9 +142,11 @@ def _residue_features(res, ph: float) -> List[Dict[str, Any]]:
     Translate a residue into pharmacophoric features based on its
     protonation state at pH `ph`.
     """
-    rname = res.get_resname().strip()
-    resid = str(res.id[1]) + res.id[2].strip()
-    chain = res.get_parent().id
+    rname  = res.get_resname().strip()
+    resseq = res.id[1]
+    icode  = res.id[2].strip()
+    resid  = f"{resseq}{icode}"
+    chain  = res.get_parent().id
 
     # Use Cα as fallback position when specific atoms aren't available
     ca_coord = _atom_coord(res, ["CA"])
@@ -141,7 +156,7 @@ def _residue_features(res, ph: float) -> List[Dict[str, Any]]:
             return []
         ca_coord = tuple(atoms[0].get_vector().get_array())
 
-    prot_state = _protonation_state(rname, resid, ph)
+    prot_state = _protonation_state(rname, resseq, chain, ph)
     features   = []
 
     if rname in ("SER", "THR"):
@@ -225,12 +240,18 @@ def _residue_features(res, ph: float) -> List[Dict[str, Any]]:
                 {"type": "ACCEPTOR",      "coords": sg, "label": f"CYS{resid}{chain} S⁻ acceptor"},
             ]
 
-    elif rname in ("ALA", "VAL", "LEU", "ILE", "PRO", "PHE", "TRP", "MET", "GLY"):
-        features.append({
-            "type"  : "HYDROPHOBIC",
-            "coords": ca_coord,
-            "label" : f"{rname}{resid}{chain} hydrophobic",
-        })
+    elif rname in ("ALA", "VAL", "LEU", "ILE", "PRO", "PHE", "TRP", "MET"):
+        # The hydrophobic contact a ligand can make is with the side chain,
+        # not with the backbone: Cα is 2–4 Å away from where the apolar
+        # surface actually is, and for TRP the whole indole. GLY is absent
+        # from this list on purpose — it has no side chain to contact.
+        hydro, where = _hydrophobic_centre(res, rname)
+        if hydro is not None:
+            features.append({
+                "type"  : "HYDROPHOBIC",
+                "coords": hydro,
+                "label" : f"{rname}{resid}{chain} hydrophobic ({where})",
+            })
 
     # Backbone H-bond capability (applies to all residues)
     n_coord = _atom_coord(res, ["N"])
@@ -246,15 +267,41 @@ def _residue_features(res, ph: float) -> List[Dict[str, Any]]:
     return features
 
 
-def _protonation_state(rname: str, resid: str, ph: float) -> Optional[str]:
+def _protonation_state(rname: str, resseq: int, chain: str,
+                       ph: float) -> Optional[str]:
     """Return 'PROTONATED', 'DEPROTONATED', or None (use pKa rule)."""
-    override = _PROTONATION_OVERRIDES.get((rname, resid))
+    override = _PROTONATION_OVERRIDES.get((rname, resseq, chain))
     if override:
         return override
     pka = _STANDARD_PKA.get(rname)
     if pka is None:
         return None
     return "PROTONATED" if ph < pka else "DEPROTONATED"
+
+
+def _hydrophobic_centre(res, rname: str):
+    """
+    Where to place the hydrophobic feature of an apolar residue, and a short
+    tag naming the choice. Aromatic residues get their ring centroid; the
+    rest get the centroid of their side-chain heavy atoms. Returns
+    (coords, tag) or (None, None) when no side chain is resolvable.
+    """
+    ring = _RING_ATOMS.get(rname)
+    if ring:
+        coords = [_atom_coord(res, [n]) for n in ring]
+        coords = [c for c in coords if c]
+        if len(coords) >= 3:
+            return tuple(np.mean(np.array(coords), axis=0)), "ring centroid"
+
+    side = [
+        atom.get_vector().get_array()
+        for atom in res.get_atoms()
+        if atom.get_name().strip() not in _BACKBONE
+        and (atom.element or atom.get_name().strip()[0]).strip().upper() != "H"
+    ]
+    if not side:
+        return None, None
+    return tuple(np.mean(np.array(side), axis=0)), "side-chain centroid"
 
 
 def _atom_coord(res, names: List[str]) -> Optional[tuple]:
