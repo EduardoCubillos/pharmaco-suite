@@ -248,7 +248,7 @@ candidates.sdf           Molecules with 3D conformations and ADMET metadata
 candidates.pdbqt         Ready for AutoDock Vina (if Meeko installed)
 candidates_admet.csv     Full metrics table
 ligands_training.smi     Training ligands used
-PREPARACION_DOCKING.md   Docking preparation instructions (in Spanish, for now)
+DOCKING_PREPARATION.md   Docking preparation instructions
 ```
 
 ---

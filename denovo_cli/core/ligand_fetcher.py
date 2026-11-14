@@ -1,10 +1,10 @@
 """
-ligand_fetcher.py — Obtener ligandos activos desde ChEMBL o desde archivo.
+ligand_fetcher.py — Collect active ligands from ChEMBL or from a file.
 
 Dos fuentes:
   1. ChEMBL API   : dado un nombre o ChEMBL ID de target, descarga SMILES
-                    de compuestos con actividad documentada (IC50/Ki/Kd).
-  2. Archivo local: .smi (un SMILES por línea), .sdf, o .csv/.tsv (col 0).
+                    compounds with documented activity (IC50/Ki/Kd).
+  2. Local file: .smi (one SMILES per line), .sdf, or .csv/.tsv (column 0).
 
 Referencia ChEMBL API: https://www.ebi.ac.uk/chembl/api/data/
 """
@@ -29,31 +29,31 @@ def fetch_ligands(
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Carga ligandos desde ChEMBL (nombre/ID de target) o desde archivo local.
+    Load ligands from ChEMBL (target name or ID) or from a local file.
 
     Parameters
     ----------
     source      : nombre del target (ej. "HIV protease"), ChEMBL ID (ej. "CHEMBL2074"),
                   o ruta a un archivo (.smi / .sdf / .csv)
-    n_max       : máximo de ligandos a devolver
-    activity_cutoff : potencia máxima en nM para incluir el compuesto (default 10 µM)
+    n_max       : maximum number of ligands to return
+    activity_cutoff : weakest potency in nM still included (default 10 µM)
     verbose     : imprimir progreso
 
     Returns
     -------
-    Lista de dicts: {'smiles', 'chembl_id', 'source', 'activity_type', 'activity_value'}
+    List of dicts: {'smiles', 'chembl_id', 'source', 'activity_type', 'activity_value'}
     """
     _log = print if verbose else lambda *a, **k: None
 
     if os.path.exists(source):
-        _log(f"[Ligandos] Cargando desde archivo: {source}")
+        _log(f"[Ligands] Loading from file: {source}")
         return _load_from_file(source, n_max, verbose)
     else:
         _log(f"[Ligandos] Buscando en ChEMBL: '{source}'")
         return _fetch_from_chembl(source, n_max, activity_cutoff, verbose)
 
 
-# ── Carga desde archivo ───────────────────────────────────────────────────────
+# ── Loading from a file ───────────────────────────────────────────────────────
 
 def _load_from_file(path: str, n_max: int, verbose: bool) -> List[Dict[str, Any]]:
     """Soporta .smi, .sdf, .csv, .tsv"""
@@ -126,11 +126,11 @@ def _load_from_file(path: str, n_max: int, verbose: bool) -> List[Dict[str, Any]
         print(f"[Ligandos] Formato no reconocido: {ext}. Use .smi, .sdf, .csv o .tsv",
               file=sys.stderr)
 
-    _log(f"[Ligandos] {len(results)} ligandos cargados desde archivo.")
+    _log(f"[Ligands] {len(results)} ligands loaded from the file.")
     return results
 
 
-# ── Fetch desde ChEMBL ────────────────────────────────────────────────────────
+# ── Fetching from ChEMBL ──────────────────────────────────────────────────────
 
 def _fetch_from_chembl(
     query: str,
@@ -139,39 +139,39 @@ def _fetch_from_chembl(
     verbose: bool,
 ) -> List[Dict[str, Any]]:
     """
-    1. Busca el target en ChEMBL (por nombre o ID).
-    2. Descarga actividades del target.
-    3. Filtra por tipo de actividad y potencia.
-    4. Devuelve SMILES únicos.
+    1. Resolve the target in ChEMBL, by name or by ID.
+    2. Download the target's activities.
+    3. Filter on activity type and potency.
+    4. Return the unique SMILES.
     """
     _log = print if verbose else lambda *a, **k: None
 
-    # Paso 1: resolver target ID
+    # Step 1: resolve the target ID
     target_id = _resolve_target_id(query, verbose)
     if not target_id:
-        print(f"[Ligandos] ERROR: target '{query}' no encontrado en ChEMBL.",
+        print(f"[Ligands] ERROR: target '{query}' not found in ChEMBL.",
               file=sys.stderr)
-        print("[Ligandos] Sugerencia: prueba con el nombre en inglés o con el ID ChEMBL directamente (ej. CHEMBL2074).",
-              file=sys.stderr)
+        print("[Ligands] Try the ChEMBL ID directly instead of the name "
+              "(e.g. CHEMBL2074).", file=sys.stderr)
         return []
 
-    _log(f"[Ligandos] Target resuelto: {target_id}")
+    _log(f"[Ligands] Target resolved: {target_id}")
 
-    # Paso 2: descargar actividades
+    # Step 2: download the activities
     activities = _fetch_activities(target_id, n_max * 3, activity_cutoff, verbose)
-    _log(f"[Ligandos] Actividades descargadas: {len(activities)}")
+    _log(f"[Ligands] Activities downloaded: {len(activities)}")
 
-    # Paso 3: obtener SMILES únicos
+    # Step 3: reduce to unique SMILES
     results = _activities_to_smiles(activities, n_max, verbose)
-    _log(f"[Ligandos] {len(results)} ligandos únicos válidos.")
+    _log(f"[Ligands] {len(results)} unique valid ligands.")
     return results
 
 
 def _resolve_target_id(query: str, verbose: bool) -> Optional[str]:
-    """Devuelve el ChEMBL ID del target, buscando por nombre o ID directo."""
+    """The target's ChEMBL ID, looked up by name or taken as given."""
     _log = print if verbose else lambda *a, **k: None
 
-    # Si ya es un ID ChEMBL
+    # Already a ChEMBL ID
     if query.upper().startswith("CHEMBL"):
         return query.upper()
 
@@ -212,7 +212,7 @@ def _resolve_target_id(query: str, verbose: bool) -> Optional[str]:
         return t["target_chembl_id"]
 
     except Exception as e:
-        print(f"[ChEMBL] Error buscando target: {e}", file=sys.stderr)
+        print(f"[ChEMBL] Error resolving the target: {e}", file=sys.stderr)
         return None
 
 
@@ -222,7 +222,7 @@ def _fetch_activities(
     activity_cutoff: float,
     verbose: bool,
 ) -> List[Dict]:
-    """Descarga actividades de ChEMBL para el target dado."""
+    """Download the ChEMBL activities of a given target."""
     _log = print if verbose else lambda *a, **k: None
 
     activities = []
@@ -247,12 +247,12 @@ def _fetch_activities(
                 break
             activities.extend(batch)
             offset += len(batch)
-            _log(f"  {len(activities)} actividades descargadas...")
+            _log(f"  {len(activities)} activities downloaded...")
             if len(batch) < page_size:
                 break
-            time.sleep(0.2)   # ser amable con la API
+            time.sleep(0.2)   # be polite to the API
         except Exception as e:
-            print(f"[ChEMBL] Error en descarga: {e}", file=sys.stderr)
+            print(f"[ChEMBL] Download error: {e}", file=sys.stderr)
             break
 
     return activities
@@ -263,7 +263,7 @@ def _activities_to_smiles(
     n_max: int,
     verbose: bool,
 ) -> List[Dict[str, Any]]:
-    """Convierte actividades a lista de SMILES únicos válidos."""
+    """Reduce a list of activities to unique, valid SMILES."""
     from rdkit import Chem
     _log = print if verbose else lambda *a, **k: None
 
@@ -288,7 +288,7 @@ def _activities_to_smiles(
         if not smi:
             continue
 
-        # Validar con RDKit
+        # Validate with RDKit
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
             continue
@@ -317,7 +317,7 @@ def _activities_to_smiles(
 
 
 def _get_molecule_smiles(chembl_id: str) -> Optional[str]:
-    """Obtiene el SMILES canónico de un compuesto ChEMBL por su ID."""
+    """Canonical SMILES of a ChEMBL compound, by its ID."""
     try:
         url = f"{CHEMBL_BASE}/molecule/{chembl_id}.json"
         r = requests.get(url, timeout=10)
@@ -328,10 +328,10 @@ def _get_molecule_smiles(chembl_id: str) -> Optional[str]:
         return None
 
 
-# ── Guardar ligandos a archivo ────────────────────────────────────────────────
+# ── Saving ligands to a file ──────────────────────────────────────────────────
 
 def save_ligands_smi(ligands: List[Dict], path: str) -> str:
-    """Guarda los ligandos en formato .smi (SMILES + nombre + actividad)."""
+    """Save the ligands as .smi (SMILES + name + activity)."""
     with open(path, "w") as f:
         f.write("# SMILES  ID  activity_type  activity_value\n")
         for lig in ligands:
