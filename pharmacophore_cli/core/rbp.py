@@ -9,12 +9,19 @@ picture to the ligand-perspective models (SBP, LBP):
   receptor ACCEPTOR → ligand must have a DONOR
 
 Protonation states are derived from standard pKa values (Henderson-
-Hasselbalch) with overrides for known catalytic residues (e.g., HIV-1
-protease Asp25, which is monoprotonated in the active dimer).
+Hasselbalch) with overrides for known catalytic residues. The one override
+shipped here encodes the monoprotonated HIV-1 protease catalytic dyad, where
+one Asp25 is protonated and the other is not; a residue whose pKa is shifted
+by its own environment needs an entry of its own, since the bulk pKa table
+cannot predict it. CITATION NEEDED before publication: pick the reference you
+want to stand behind for the dyad's protonation state.
 
 References:
-  - Sliwoski et al. (2014) Pharmacol. Rev. 66, 334–395
-  - Koes & Camacho (2012) J. Chem. Inf. Model. 52, 2098–2106
+  - Sliwoski et al. (2014) Pharmacol. Rev. 66, 334–395 — review of
+    computational methods in drug discovery, incl. receptor-based
+    pharmacophore construction
+  - Koes & Camacho (2011) J. Chem. Inf. Model. 51, 1307–1314 — Pharmer, on
+    searching with the kind of model this module produces
 """
 
 import numpy as np

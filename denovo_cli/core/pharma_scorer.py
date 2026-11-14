@@ -13,8 +13,9 @@ Dos modos:
                      entradas, porque solo usa geometría interna.
 
 Referencias:
-  - Dixon et al. (2006) J. Comput.-Aided Mol. Des. 20, 647–671 (PHASE)
-  - Wolber et al. (2006) J. Comput.-Aided Mol. Des. 20, 773–788 (LigandScout)
+  - Dixon et al. (2006) J. Comput.-Aided Mol. Des. 20, 647–671 — PHASE
+  - Wolber, Dornhofer & Langer (2006) J. Comput.-Aided Mol. Des. 20, 773–788
+    — superposición de moléculas pequeñas sobre farmacóforos 3D
 """
 
 import os

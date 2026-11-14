@@ -12,8 +12,10 @@ Each feature gets a weight (1–3) based on how many models agree on it.
 Features with weight ≥ 2 are the most reliable for virtual screening.
 
 References:
-  - Baroni et al. (2007) J. Chem. Inf. Model. 47, 279–294 (PHASE)
-  - Sanders et al. (2012) J. Chem. Inf. Model. 52, 1261–1272
+  - Baroni et al. (2007) J. Chem. Inf. Model. 47, 279–294 — FLAP, on a common
+    reference frame for comparing proteins and ligands
+  - Sanders et al. (2012) J. Chem. Inf. Model. 52, 1607–1620 — comparative
+    assessment of pharmacophore screening tools
 """
 
 import numpy as np
@@ -29,7 +31,13 @@ COMPLEMENT_OF: Dict[str, str] = {
     "NEG_IONIZABLE" : "POS_IONIZABLE",
 }
 
-# Wolber & Langer / Baroni standard for inter-model feature fusion
+# Radius within which features from two different models are taken to describe
+# the same interaction. This is a default of this tool, not a value prescribed
+# by any published method: it is set near a hydrogen-bond donor-acceptor
+# distance (~2.8–3.2 Å) plus the coordinate error that separates a crystal
+# contact point from a conformer-derived feature. Override it with
+# --consensus-radius; a tighter value raises the weights' specificity and a
+# looser one merges interactions that are physically distinct.
 CONSENSUS_RADIUS_DEFAULT = 3.5   # Å
 
 
