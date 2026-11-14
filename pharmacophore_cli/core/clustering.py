@@ -39,10 +39,11 @@ def cluster_features(
     Merge pharmacophoric features of the same type that fall within the
     type-specific clustering radius. Returns the list of centroids.
 
-    Algorithm: greedy single-linkage per feature type. Each incoming
-    feature is assigned to the first existing cluster whose centroid is
-    within the radius; if none qualifies, it starts a new cluster.
-    Fast, reproducible, and good enough for pharmacophore densities.
+    Algorithm: greedy clustering per feature type. Each incoming feature
+    joins the *nearest* existing cluster whose centroid lies within the
+    radius; if none qualifies, it starts a new cluster. Fast, reproducible
+    and good enough for pharmacophore densities, but the result still
+    depends on input order, so features are sorted canonically first.
 
     Parameters
     ----------
@@ -71,10 +72,12 @@ def cluster_features(
             centroid = tuple(coords_arr.mean(axis=0))
             sources = {f.get("source", "?") for f in cluster}
             source = sources.pop() if len(sources) == 1 else "mixed"
+            frames = {f.get("frame", "receptor") for f in cluster}
             out.append({
                 "type"      : ftype,
                 "coords"    : centroid,
                 "source"    : source,
+                "frame"     : frames.pop() if len(frames) == 1 else "mixed",
                 "n_merged"  : len(cluster),
                 "clustered" : True,
                 "label"     : f"{ftype} [{len(cluster)} pts merged, r={r}Å]",
@@ -90,22 +93,32 @@ def _assign_to_clusters(
     Greedy clustering: iterate features and assign each to the nearest
     existing cluster within `radius`. Start a new cluster if none qualifies.
     Centroids are updated incrementally as features are added.
+
+    Picking the nearest candidate rather than the first one encountered
+    keeps the assignment independent of how the clusters happen to be
+    ordered in memory. Features are visited in a canonical coordinate
+    order so that two runs on the same input always return the same
+    clusters, whatever order the upstream model emitted them in.
     """
     clusters: List[List[Dict]] = []
     centroids: List[np.ndarray] = []
 
-    for f in features:
+    ordered = sorted(features, key=lambda f: tuple(round(float(c), 4)
+                                                   for c in f["coords"]))
+
+    for f in ordered:
         fc = np.array(f["coords"], dtype=float)
-        placed = False
+        best_k, best_d = None, radius
         for k, ctr in enumerate(centroids):
-            if np.linalg.norm(fc - ctr) < radius:
-                clusters[k].append(f)
-                n = len(clusters[k])
-                centroids[k] = ctr + (fc - ctr) / n   # running mean
-                placed = True
-                break
-        if not placed:
+            d = float(np.linalg.norm(fc - ctr))
+            if d < best_d:
+                best_k, best_d = k, d
+        if best_k is None:
             clusters.append([f])
             centroids.append(fc.copy())
+        else:
+            clusters[best_k].append(f)
+            n = len(clusters[best_k])
+            centroids[best_k] = centroids[best_k] + (fc - centroids[best_k]) / n
 
     return clusters

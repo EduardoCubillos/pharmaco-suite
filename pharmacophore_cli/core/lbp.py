@@ -6,9 +6,13 @@ When multiple ligands are given, the model retains only features present
 in at least `min_frequency` of them — similar to PHASE/LigandScout
 multi-ligand consensus mode.
 
-If a co-crystal PDB is provided, the LBP is aligned to receptor space
-via RMSD alignment of the SMILES-generated 3D conformer to the crystal
-ligand (Kabsch algorithm).
+If a co-crystal PDB is provided, the LBP is aligned to receptor space by
+superimposing the SMILES-generated 3D conformer onto the crystal ligand.
+Atom correspondence comes from a symmetry-aware substructure match
+between the two molecules, never from atom order, and the resulting fit
+is accepted only if its RMSD falls below `max_align_rmsd`. Features carry
+a `frame` field ('receptor' or 'ligand') so that downstream consensus
+never fuses coordinates expressed in different reference frames.
 
 Reference: RDKit BaseFeatures.fdef — Riniker & Landrum (2015).
 """
@@ -32,11 +36,15 @@ _RDKIT_FAMILY_MAP = {
 }
 
 
+MAX_ALIGN_RMSD_DEFAULT = 1.5   # Å — above this the superposition is rejected
+
+
 def generate_lbp(
     smiles_list: List[str],
     align_to_pdb: Optional[str] = None,
     align_ligand_resname: str = "RIT",
     verbose: bool = True,
+    max_align_rmsd: float = MAX_ALIGN_RMSD_DEFAULT,
 ) -> List[Dict[str, Any]]:
     """
     Generate LBP features for one or more SMILES.
@@ -47,10 +55,13 @@ def generate_lbp(
     align_to_pdb         : PDB file to align LBP coordinates into receptor space
     align_ligand_resname : residue name of the reference ligand in the PDB
     verbose              : print progress
+    max_align_rmsd       : reject the superposition above this RMSD (Å)
 
     Returns
     -------
-    List of feature dicts with 'type', 'coords', 'label', 'source'
+    List of feature dicts with 'type', 'coords', 'label', 'source' and
+    'frame' ('receptor' if successfully aligned to the crystal ligand,
+    'ligand' if the coordinates remain in the conformer's own frame).
     """
     _log = print if verbose else lambda *a, **k: None
 
@@ -86,15 +97,22 @@ def generate_lbp(
         features = _multi_ligand_consensus(mol_feature_sets, verbose)
 
     # Align into receptor coordinate space if a crystal structure is available
+    frame = "ligand"
     if align_to_pdb and mols_3d:
-        features = _align_to_crystal_ligand(
-            features, mols_3d[0], align_to_pdb, align_ligand_resname, verbose
+        features, frame = _align_to_crystal_ligand(
+            features, mols_3d[0], align_to_pdb, align_ligand_resname,
+            verbose, max_align_rmsd,
         )
 
     for f in features:
         f["source"] = "LBP"
+        f["frame"]  = frame
 
-    _log(f"[LBP] {len(features)} LBP features generated.")
+    _log(f"[LBP] {len(features)} LBP features generated (frame: {frame}).")
+    if align_to_pdb and frame == "ligand":
+        _log("[LBP] WARNING: coordinates are NOT in receptor space. They describe "
+             "the ligand's internal geometry only and must not be fused with "
+             "SBP/RBP features or compared to the crystal site.")
     return features
 
 
@@ -220,58 +238,174 @@ def _align_to_crystal_ligand(
     pdb_file: str,
     ligand_resname: str,
     verbose: bool,
-) -> List[Dict[str, Any]]:
+    max_rmsd: float = MAX_ALIGN_RMSD_DEFAULT,
+):
     """
-    Align LBP feature coordinates to receptor space by superimposing
-    the RDKit 3D conformer onto the crystal ligand (Kabsch RMSD alignment).
+    Align LBP feature coordinates to receptor space by superimposing the
+    RDKit 3D conformer onto the crystal ligand.
+
+    Atom correspondence is established by substructure matching between the
+    conformer and the crystal copy of the same molecule, enumerating the
+    graph automorphisms so that symmetry-equivalent atoms (the two oxygens
+    of a carboxylate, the ortho positions of a phenyl) are not forced into
+    an arbitrary pairing. Of all valid matches the one with the lowest
+    Kabsch RMSD is kept, and the fit is accepted only below `max_rmsd`.
+
+    Returns
+    -------
+    (features, frame) where frame is 'receptor' if the transformation was
+    applied and 'ligand' if the original coordinates were kept.
     """
     _log = print if verbose else lambda *a, **k: None
 
     try:
-        from Bio.PDB import PDBParser
-        import warnings
-        warnings.filterwarnings("ignore")
+        ref = _load_crystal_ligand(pdb_file, ligand_resname)
+        if ref is None:
+            _log(f"[LBP] Warning: ligand '{ligand_resname}' not found in {pdb_file} "
+                 "— no alignment performed.")
+            return features, "ligand"
 
-        parser = PDBParser(QUIET=True)
-        struct = parser.get_structure("ref", pdb_file)
-        crystal_atoms = []
-        for chain in struct[0]:
-            for res in chain:
-                if res.get_resname().strip() == ligand_resname.strip().upper():
-                    crystal_atoms = list(res.get_atoms())
-                    break
+        probe = _strip_hydrogens(mol3d)
+        amap  = _best_atom_map(probe, ref)
+        if amap is None:
+            _log(f"[LBP] Warning: the conformer and the crystal copy of "
+                 f"'{ligand_resname}' do not share a common substructure "
+                 f"({probe.GetNumAtoms()} vs {ref.GetNumAtoms()} heavy atoms). "
+                 "No alignment performed.")
+            return features, "ligand"
 
-        if not crystal_atoms:
-            _log(f"[LBP] Warning: ligand '{ligand_resname}' not found in PDB — skipping alignment.")
-            return features
+        probe_idx, ref_idx, rmsd, R, t = amap
+        n_used = len(probe_idx)
+        _log(f"[LBP] Superposition on {n_used} matched heavy atoms: RMSD {rmsd:.3f} Å")
 
-        ref_coords   = np.array([a.get_vector().get_array() for a in crystal_atoms])
-        n_heavy_ref  = len(ref_coords)
-        n_heavy_mol  = mol3d.GetNumAtoms()
+        if rmsd > max_rmsd:
+            _log(f"[LBP] Warning: RMSD {rmsd:.3f} Å exceeds the {max_rmsd} Å "
+                 "threshold — the conformer does not reproduce the crystal pose. "
+                 "No alignment performed.")
+            return features, "ligand"
 
-        if n_heavy_mol != n_heavy_ref:
-            _log(f"[LBP] Warning: atom count mismatch ({n_heavy_mol} vs {n_heavy_ref}). "
-                 "Skipping alignment — using relative LBP coordinates.")
-            return features
-
-        conf = mol3d.GetConformer()
-        mol_coords = np.array([list(conf.GetAtomPosition(i)) for i in range(n_heavy_mol)])
-
-        R, t = _kabsch(mol_coords, ref_coords)
-        mol_coords_aligned = (mol_coords @ R.T) + t
-        rmsd = float(np.sqrt(np.mean(np.sum((mol_coords_aligned - ref_coords)**2, axis=1))))
-        _log(f"[LBP] Alignment RMSD to crystal: {rmsd:.3f} Å")
-
-        # Apply same transformation to all feature coordinates
         aligned = []
         for f in features:
             fc = np.array(f["coords"], dtype=float)
-            aligned.append({**f, "coords": tuple((fc @ R.T) + t)})
-        return aligned
+            aligned.append({**f, "coords": tuple((fc @ R.T) + t),
+                            "align_rmsd": round(rmsd, 3)})
+        return aligned, "receptor"
 
     except Exception as e:
-        _log(f"[LBP] Alignment failed ({e}), returning unaligned features.")
-        return features
+        _log(f"[LBP] Alignment failed ({e}) — no alignment performed.")
+        return features, "ligand"
+
+
+def _load_crystal_ligand(pdb_file: str, ligand_resname: str):
+    """
+    Read the first copy of `ligand_resname` from a PDB file into an RDKit
+    molecule with 3D coordinates. Only one residue instance is taken, so a
+    structure with several copies of the ligand cannot produce a chimeric
+    reference. Alternate locations other than A are discarded.
+    """
+    from rdkit import Chem
+
+    want     = ligand_resname.strip().upper()
+    selected = None
+    lines    = []
+
+    with open(pdb_file) as fh:
+        for line in fh:
+            if not line.startswith(("HETATM", "ATOM  ")):
+                continue
+            if line[17:20].strip().upper() != want:
+                continue
+            altloc = line[16]
+            if altloc not in (" ", "A"):
+                continue
+            key = (line[21], line[22:27])          # chain + resseq + icode
+            if selected is None:
+                selected = key
+            elif key != selected:
+                continue
+            lines.append(line)
+
+    if not lines:
+        return None
+
+    block = "".join(lines) + "END\n"
+    ref = Chem.MolFromPDBBlock(block, sanitize=False, removeHs=True,
+                               proximityBonding=True)
+    if ref is None:
+        return None
+    _sanitize_loosely(ref)
+    return ref
+
+
+def _strip_hydrogens(mol):
+    """Heavy-atom copy of a molecule, keeping its conformer."""
+    from rdkit import Chem
+    return Chem.RemoveHs(Chem.Mol(mol))
+
+
+def _sanitize_loosely(mol) -> None:
+    """
+    Sanitize enough for substructure matching (ring perception, valences)
+    without failing on the aromaticity and kekulization problems that
+    PDB-derived connectivity routinely produces.
+    """
+    from rdkit import Chem
+    try:
+        Chem.SanitizeMol(mol)
+        return
+    except Exception:
+        pass
+    flags = (Chem.SanitizeFlags.SANITIZE_ALL
+             ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE
+             ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
+             ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+    Chem.SanitizeMol(mol, sanitizeOps=flags, catchErrors=True)
+
+
+def _best_atom_map(probe, ref, max_matches: int = 1000):
+    """
+    Find the probe→ref atom correspondence that minimizes Kabsch RMSD.
+
+    Bond orders are ignored, because a PDB ligand carries no bond-order
+    information: only the heavy-atom skeleton with element identity and
+    connectivity is matched. All symmetry-equivalent mappings returned by
+    RDKit are scored and the best one wins.
+
+    Returns (probe_indices, ref_indices, rmsd, R, t) or None.
+    """
+    from rdkit import Chem
+
+    qp = Chem.AdjustQueryParameters.NoAdjustments()
+    qp.makeBondsGeneric = True
+    qp.aromatizeIfPossible = False
+    query = Chem.AdjustQueryProperties(Chem.Mol(probe), qp)
+
+    matches = ref.GetSubstructMatches(
+        query, uniquify=False, useChirality=False, maxMatches=max_matches
+    )
+    if not matches:
+        return None
+
+    probe_conf = probe.GetConformer()
+    ref_conf   = ref.GetConformer()
+    probe_all  = np.array([list(probe_conf.GetAtomPosition(i))
+                           for i in range(probe.GetNumAtoms())])
+    ref_all    = np.array([list(ref_conf.GetAtomPosition(i))
+                           for i in range(ref.GetNumAtoms())])
+
+    probe_idx = list(range(probe.GetNumAtoms()))
+    best = None
+
+    for match in matches:
+        ref_idx = list(match)
+        P = probe_all[probe_idx]
+        Q = ref_all[ref_idx]
+        R, t = _kabsch(P, Q)
+        rmsd = float(np.sqrt(np.mean(np.sum(((P @ R.T) + t - Q) ** 2, axis=1))))
+        if best is None or rmsd < best[2]:
+            best = (probe_idx, ref_idx, rmsd, R, t)
+
+    return best
 
 
 def _kabsch(P: np.ndarray, Q: np.ndarray):
