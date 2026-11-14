@@ -1,14 +1,12 @@
 """
-generator.py — Generación de moléculas de novo via Algoritmo Genético SELFIES.
+generator.py — De novo molecule generation by a SELFIES genetic algorithm.
 
-Dado un conjunto de ligandos semilla (con su perfil farmacofórico),
-genera exactamente N moléculas nuevas que:
-  - Son químicamente válidas (garantía SELFIES)
-  - Pasan filtros ADMET básicos
-  - Tienen puntuación farmacofórica ≥ umbral
-  - Son suficientemente diversas entre sí (Tanimoto < umbral)
+Given a set of seed ligands and their pharmacophoric profile, generates N
+new molecules that are chemically valid by construction (SELFIES), pass the
+ADMET filters, score above the pharmacophore threshold, and are diverse
+enough from each other (Tanimoto below the threshold).
 
-Referencia:
+References:
   - Krenn et al. (2020) Machine Learning: Science and Technology 1, 045024
   - Nigam et al. (2021) Nature Machine Intelligence 3, 573–584
 """
@@ -19,7 +17,7 @@ from typing import List, Dict, Any, Optional
 from collections import defaultdict
 
 
-# ── Parámetros por defecto del GA ─────────────────────────────────────────────
+# ── GA defaults ───────────────────────────────────────────────────────────────
 GA_DEFAULTS = {
     "n_pop"         : 60,
     "n_gen"         : 50,
@@ -27,7 +25,7 @@ GA_DEFAULTS = {
     "p_mut"         : 0.65,
     "p_cross"       : 0.40,
     "max_selfies_len": 90,
-    "diversity_threshold": 0.85,  # Tanimoto máximo entre candidatas finales
+    "diversity_threshold": 0.85,  # max Tanimoto between final candidates
 }
 
 
@@ -40,20 +38,20 @@ def generate_molecules(
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Genera n_target moléculas nuevas usando GA SELFIES.
+    Generate n_target new molecules with a SELFIES GA.
 
     Parameters
     ----------
-    seed_smiles       : lista de SMILES de los ligandos de entrenamiento
+    seed_smiles       : SMILES of the training ligands
     reference_profile : perfil de features LBP {tipo: count}
-    n_target          : número de moléculas únicas a generar (default 20)
-    ga_params         : sobreescribir parámetros del GA
+    n_target          : number of unique molecules to generate (default 20)
+    ga_params         : override GA parameters
     admet_filters     : sobreescribir filtros ADMET
     verbose           : imprimir progreso
 
     Returns
     -------
-    Lista de dicts con 'smiles', 'pharma_score', métricas ADMET, 'rank'
+    List of dicts with 'smiles', 'pharma_score', the ADMET metrics, 'rank'
     """
     import selfies as sf
     from rdkit import Chem, DataStructs
@@ -69,16 +67,16 @@ def generate_molecules(
     # ── Alfabeto SELFIES ──────────────────────────────────────────────────────
     alphabet = list(sf.get_semantic_robust_alphabet())
 
-    # ── Función de scoring interna ────────────────────────────────────────────
+    # ── Internal scoring function ─────────────────────────────────────────────
     fp_seeds = []
-    for smi in seed_smiles[:20]:   # usar hasta 20 seeds para fps
+    for smi in seed_smiles[:20]:   # up to 20 seeds for the fingerprints
         mol = Chem.MolFromSmiles(smi)
         if mol:
             fp_seeds.append(AllChem.GetMorganFingerprintAsBitVect(mol, 2, 2048))
 
-    # Un SMILES puntúa siempre igual, y el GA vuelve a ver los mismos elitistas
-    # generación tras generación: sin caché, compute_admet y el SA Score se
-    # recalculaban para cada élite en cada generación.
+    # A given SMILES always scores the same, and the GA sees the same elites
+    # generation after generation: without a cache, compute_admet and the SA
+    # Score were recomputed for every elite in every generation.
     score_cache: Dict[str, float] = {}
 
     def _score(smi: str) -> float:
@@ -97,7 +95,7 @@ def generate_molecules(
                 return 0.0
             ps  = pharmacophore_score(mol, reference_profile)
             qed = admet.get("qed", 0.0)
-            # Penalizar si es idéntica a algún seed (Tanimoto > 0.95)
+            # Reject anything essentially identical to a seed (Tanimoto > 0.95)
             if fp_seeds:
                 fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, 2048)
                 max_sim = max(DataStructs.TanimotoSimilarity(fp, fp_s) for fp_s in fp_seeds)
@@ -142,8 +140,8 @@ def generate_molecules(
         new_sel = "".join(child)
         return new_sel if sel2smi(new_sel) else sel1
 
-    # ── Población inicial ─────────────────────────────────────────────────────
-    _log(f"[GA] Inicializando población (N={params['n_pop']})...")
+    # ── Initial population ────────────────────────────────────────────────────
+    _log(f"[GA] Initializing population (N={params['n_pop']})...")
     population = []
     for smi in seed_smiles:
         sel = smi2sel(smi)
@@ -160,7 +158,7 @@ def generate_molecules(
         s = mutate(base)
         if sel2smi(s): population.append(s)
 
-    _log(f"[GA] Población inicial: {len(population)} individuos")
+    _log(f"[GA] Initial population: {len(population)} individuals")
 
     # ── Ciclo evolutivo ───────────────────────────────────────────────────────
     best_score = 0.0
@@ -201,7 +199,7 @@ def generate_molecules(
 
         population = new_pop
 
-    _log(f"[GA] Evolución completada. Mejor score: {best_score:.4f}")
+    _log(f"[GA] Evolution finished. Best score: {best_score:.4f}")
 
     # ── Recolectar y deduplicar ───────────────────────────────────────────────
     candidates = []
@@ -235,18 +233,18 @@ def generate_molecules(
     candidates.sort(key=lambda x: -x["score"])
 
     # ── Filtro de diversidad ──────────────────────────────────────────────────
-    _log(f"[GA] Candidatas antes de filtro diversidad: {len(candidates)}")
+    _log(f"[GA] Candidates before the diversity filter: {len(candidates)}")
     final = _diversity_filter(
         candidates,
         n_target,
         params["diversity_threshold"],
     )
-    _log(f"[GA] Candidatas finales (N={n_target}): {len(final)}")
+    _log(f"[GA] Final candidates (N={n_target}): {len(final)}")
 
     # Si no llegamos al target, intentar relajar
     if len(final) < n_target:
-        _log(f"[GA] Advertencia: solo se generaron {len(final)} moléculas "
-             f"(objetivo: {n_target}). Considera aumentar n_gen o n_pop.")
+        _log(f"[GA] Warning: only {len(final)} molecules generated "
+             f"(target: {n_target}). Consider raising n_gen or n_pop.")
 
     for i, mol_dict in enumerate(final, 1):
         mol_dict["rank"] = i
@@ -260,8 +258,8 @@ def _diversity_filter(
     max_tanimoto: float,
 ) -> List[Dict]:
     """
-    Greedy diversity filter: retiene candidatas cuyo Tanimoto con todas las
-    ya seleccionadas sea ≤ max_tanimoto.
+    Greedy diversity filter: keep a candidate only if its Tanimoto to every
+    already-selected candidate is at most max_tanimoto.
     """
     from rdkit import Chem, DataStructs
     from rdkit.Chem import AllChem

@@ -1,21 +1,21 @@
 """
-pharma_scorer.py — Puntuación farmacofórica contra modelos SBP/LBP/consenso.
+pharma_scorer.py — Pharmacophore scoring against SBP/LBP/consensus models.
 
-Dos modos:
-  1. Feature-based : cuenta qué fracción de features del modelo están
-                     químicamente presentes en la molécula candidata. Ignora
-                     la geometría: dice qué grupos hay, no dónde quedan.
-  2. 3D fit        : carga un PDB de farmacóforo generado por pharmacophore_cli
-                     y resuelve si la molécula puede adoptar una conformación
-                     que coloque sus grupos sobre los puntos del modelo
-                     (constrained embedding + superposición). Invariante a
-                     rotaciones y traslaciones de cualquiera de las dos
-                     entradas, porque solo usa geometría interna.
+Two modes:
+  1. Feature-based : what fraction of the model's features are chemically
+                     present in the candidate. Ignores geometry — it reports
+                     which groups exist, not where they sit.
+  2. 3D fit        : loads a pharmacophore PDB written by pharmacophore_cli
+                     and asks whether the molecule can adopt a conformation
+                     that places its groups on the model's points, by
+                     aligning a conformer ensemble onto them. Invariant to
+                     rotation and translation of either input, since only
+                     internal geometry enters the calculation.
 
-Referencias:
+References:
   - Dixon et al. (2006) J. Comput.-Aided Mol. Des. 20, 647–671 — PHASE
   - Wolber, Dornhofer & Langer (2006) J. Comput.-Aided Mol. Des. 20, 773–788
-    — superposición de moléculas pequeñas sobre farmacóforos 3D
+    — overlay of small organic molecules onto 3D pharmacophores
 """
 
 import os
@@ -23,7 +23,7 @@ import sys
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-# Mapeo familias RDKit → tipos canónicos
+# RDKit feature families mapped to the canonical types used across the suite
 FTYPE_MAP = {
     "Acceptor"          : "ACCEPTOR",
     "Donor"             : "DONOR",
@@ -46,7 +46,7 @@ def _get_factory():
 
 
 def get_feature_counts(mol) -> Dict[str, int]:
-    """Cuenta features farmacofóricos de una molécula con RDKit."""
+    """Count a molecule's pharmacophoric features with RDKit."""
     if mol is None:
         return {}
     counts = {}
@@ -62,9 +62,8 @@ def get_feature_counts(mol) -> Dict[str, int]:
 
 def build_reference_profile(smiles_list: List[str]) -> Dict[str, int]:
     """
-    Construye el perfil de features de referencia como la UNIÓN
-    de los features presentes en al menos la mitad de los ligandos.
-    Usado para LBP multi-ligando.
+    Build the reference feature profile as the union of the features
+    present in at least half of the ligands. Used for multi-ligand LBP.
     """
     from rdkit import Chem
     from collections import Counter
@@ -81,7 +80,7 @@ def build_reference_profile(smiles_list: List[str]) -> Dict[str, int]:
     n = len(all_counts)
     min_freq = max(1, int(np.ceil(0.5 * n)))   # presente en ≥50% de ligandos
 
-    # Contar en cuántas moléculas aparece cada (tipo, count)
+    # Count in how many molecules each feature type appears
     type_counts = Counter()
     for counts in all_counts:
         for ftype, n_feat in counts.items():
@@ -93,8 +92,8 @@ def build_reference_profile(smiles_list: List[str]) -> Dict[str, int]:
 
 def pharmacophore_score(mol, reference: Dict[str, int]) -> float:
     """
-    Fracción de features del perfil de referencia presentes en mol.
-    0.0 = ningún feature | 1.0 = todos los features presentes.
+    Fraction of the reference profile's features present in mol.
+    0.0 = none present | 1.0 = all present.
     """
     if mol is None or not reference:
         return 0.0
@@ -108,8 +107,8 @@ def pharmacophore_score(mol, reference: Dict[str, int]) -> float:
 
 def load_pharmacophore_pdb(pdb_file: str) -> List[Dict[str, Any]]:
     """
-    Carga features desde un PDB generado por pharmacophore_cli.
-    Formato: ATOM con nombre A/D/H/P/N, coordenadas x/y/z, occupancy=weight/3.
+    Load features from a PDB written by pharmacophore_cli.
+    Format: ATOM records named A/D/H/P/N, x/y/z coordinates, occupancy = weight/3.
     """
     TYPE_FROM_CHAR = {
         "A": "ACCEPTOR", "D": "DONOR", "H": "HYDROPHOBIC",
@@ -224,11 +223,20 @@ def score_against_pdb_pharmacophore(
     if not confs:
         return _out(0.0, n_points_total=n_total, reason="no_conformer")
 
-    # Triangles of model points, non-degenerate and ordered by spread: a wide
-    # triangle pins the superposition down, a nearly collinear one does not
-    triples = _model_triples(p_dist, tolerance)
+    # Triangles of model points, ordered by spread: a wide triangle pins the
+    # superposition down, a thin one leaves the rotation about its long axis
+    # poorly determined. A model whose points are essentially collinear — a
+    # small planar ligand's features often are — yields no usable triangle at
+    # all, and is then fitted from pairs with the rotation about the pair's
+    # axis sampled, which costs nothing when the model has no off-axis
+    # structure for that rotation to disturb.
+    triples = _model_triples(p_dist)
+    proposals = [("triple", t) for t in triples]
     if not triples:
-        return _out(0.0, n_points_total=n_total, reason="model_degenerate")
+        pairs = _model_pairs(p_dist)
+        if not pairs:
+            return _out(0.0, n_points_total=n_total, reason="model_degenerate")
+        proposals = [("pair", p) for p in pairs]
 
     # Upper bound on reachable weight: a model point can only ever be matched
     # by a molecule feature of its own type, so a molecule carrying two
@@ -251,46 +259,33 @@ def score_against_pdb_pharmacophore(
             continue
         m_dist = np.linalg.norm(m_xyz[:, None, :] - m_xyz[None, :, :], axis=-1)
 
-        for (i, j, k) in triples:
+        for kind, anchor in proposals:
             if best_w >= w_reachable:
                 break
-            cand_i = by_type.get(p_type[i], [])
-            cand_j = by_type.get(p_type[j], [])
-            cand_k = by_type.get(p_type[k], [])
-            if not (cand_i and cand_j and cand_k):
+            cands = [by_type.get(p_type[idx], []) for idx in anchor]
+            if not all(cands):
                 continue
 
-            for a in cand_i:
-                for b in cand_j:
-                    if b == a or abs(m_dist[a, b] - p_dist[i, j]) > 2 * tolerance:
-                        continue
-                    for c in cand_k:
-                        if c in (a, b):
-                            continue
-                        if abs(m_dist[a, c] - p_dist[i, k]) > 2 * tolerance:
-                            continue
-                        if abs(m_dist[b, c] - p_dist[j, k]) > 2 * tolerance:
-                            continue
+            for combo in _combinations(cands, anchor, m_dist, p_dist, tolerance):
+                trials += 1
+                if trials > max_trials:
+                    return _finish(_out, best_w, w_total, best_n,
+                                   n_total, best_rmsd, min_points,
+                                   truncated=True)
 
-                        trials += 1
-                        if trials > max_trials:
-                            return _finish(_out, best_w, w_total, best_n,
-                                           n_total, best_rmsd, min_points,
-                                           truncated=True)
-
-                        R, t = _kabsch(m_xyz[[a, b, c]], p_xyz[[i, j, k]])
-                        moved = (m_xyz @ R.T) + t
-                        w, n, rmsd = _coverage(moved, mol_feats, p_xyz,
-                                               p_type, p_w, tolerance)
-                        if n >= min_points and (w > best_w or
-                                                (w == best_w and rmsd is not None
-                                                 and (best_rmsd is None or rmsd < best_rmsd))):
-                            best_w, best_n, best_rmsd = w, n, rmsd
+                for R, t in _superpositions(m_xyz, p_xyz, combo, anchor, kind):
+                    moved = (m_xyz @ R.T) + t
+                    w, n, rmsd = _coverage(moved, mol_feats, p_xyz,
+                                           p_type, p_w, tolerance)
+                    if n >= min_points and (w > best_w or
+                                            (w == best_w and rmsd is not None
+                                             and (best_rmsd is None or rmsd < best_rmsd))):
+                        best_w, best_n, best_rmsd = w, n, rmsd
 
     return _finish(_out, best_w, w_total, best_n, n_total, best_rmsd, min_points)
 
 
-# ── Internals del fit 3D ──────────────────────────────────────────────────────
+# ── 3D fit internals ──────────────────────────────────────────────────────────
 
 def _finish(_out, best_w, w_total, best_n, n_total, best_rmsd, min_points,
             truncated: bool = False):
@@ -395,13 +390,13 @@ def _conformer_ensemble(mol, n_conformers: int, seed: int) -> List[List]:
     return out
 
 
-def _model_triples(p_dist: np.ndarray, tolerance: float,
-                   min_side: float = 2.0) -> List[tuple]:
+def _model_triples(p_dist: np.ndarray, min_side: float = 2.0,
+                   min_area: float = 1.0) -> List[tuple]:
     """
     Triples of model points that define a usable superposition: sides long
-    enough not to be degenerate, and not collinear. Wider triangles first,
-    since those constrain the rotation best and reach the right answer with
-    fewer trials.
+    enough not to be degenerate, and spanning enough area not to be
+    collinear. Wider triangles first, since those constrain the rotation
+    best and reach the right answer with fewer trials.
     """
     n = p_dist.shape[0]
     triples = []
@@ -418,11 +413,90 @@ def _model_triples(p_dist: np.ndarray, tolerance: float,
                 if area2 <= 0:
                     continue
                 area = float(np.sqrt(area2))
-                if area < tolerance ** 2:        # too close to collinear
+                if area < min_area:
                     continue
                 triples.append((area, (i, j, k)))
     triples.sort(key=lambda x: -x[0])
     return [t for _, t in triples]
+
+
+def _model_pairs(p_dist: np.ndarray, min_side: float = 2.0) -> List[tuple]:
+    """
+    Pairs of model points, widest first. Used only when the model has no
+    usable triangle, which means its points are essentially collinear.
+    """
+    n = p_dist.shape[0]
+    pairs = [(float(p_dist[i, j]), (i, j))
+             for i in range(n) for j in range(i + 1, n)
+             if p_dist[i, j] >= min_side]
+    pairs.sort(key=lambda x: -x[0])
+    return [p for _, p in pairs]
+
+
+def _combinations(cands: List[List[int]], anchor: tuple, m_dist: np.ndarray,
+                  p_dist: np.ndarray, tolerance: float):
+    """
+    Assignments of distinct molecule features to the anchor's model points,
+    keeping only those whose internal distances agree with the model's to
+    within 2 * tolerance (each endpoint may be off by up to one tolerance
+    radius). Yields tuples of molecule feature indices.
+    """
+    k = len(anchor)
+
+    def walk(chosen: List[int], depth: int):
+        if depth == k:
+            yield tuple(chosen)
+            return
+        for m in cands[depth]:
+            if m in chosen:
+                continue
+            ok = True
+            for prev, m_prev in enumerate(chosen):
+                target = p_dist[anchor[prev], anchor[depth]]
+                if abs(m_dist[m_prev, m] - target) > 2 * tolerance:
+                    ok = False
+                    break
+            if ok:
+                chosen.append(m)
+                yield from walk(chosen, depth + 1)
+                chosen.pop()
+
+    yield from walk([], 0)
+
+
+def _superpositions(m_xyz: np.ndarray, p_xyz: np.ndarray, combo: tuple,
+                    anchor: tuple, kind: str, n_spins: int = 12):
+    """
+    Rigid transformations placing the chosen molecule features on the anchor's
+    model points. A triple determines one; a pair leaves the rotation about
+    the pair's axis free, so that rotation is sampled.
+    """
+    P = m_xyz[list(combo)]
+    Q = p_xyz[list(anchor)]
+    R, t = _kabsch(P, Q)
+    if kind == "triple":
+        yield R, t
+        return
+
+    axis = Q[1] - Q[0]
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-8:
+        yield R, t
+        return
+    axis = axis / norm
+    pivot = Q[0]
+    for s in range(n_spins):
+        spin = _rotation_about(axis, 2.0 * np.pi * s / n_spins)
+        # x -> ((x @ R.T + t) - pivot) @ spin.T + pivot, rewritten in the
+        # (R, t) convention used throughout: moved = x @ R.T + t
+        yield spin @ R, (t - pivot) @ spin.T + pivot
+
+
+def _rotation_about(axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rotation matrix about a unit axis (Rodrigues)."""
+    x, y, z = axis
+    K = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
 
 
 def _coverage(moved: np.ndarray, mol_feats: List, p_xyz: np.ndarray,

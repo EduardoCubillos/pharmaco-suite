@@ -161,7 +161,7 @@ def cmd_run(args):
                 return_details=True,
             )
             cand["pharma_score_3d"] = round(score, 3)
-            cand["fit_points"]      = f"{info['n_points_fitted']}/{info['n_points_total']}"
+            cand["fit_points"]      = f"{info['n_points_matched']}/{info['n_points_total']}"
             cand["fit_rmsd"]        = info["fit_rmsd"]
             if score > 0:
                 n_fit += 1
@@ -207,7 +207,7 @@ def cmd_run(args):
     else:
         print(f"  2. Prepare ligands:  mk_prepare_ligand.py -i {paths['sdf']} ...")
         print(f"  3. Run docking:      vina --receptor protein.pdbqt --ligands ligands/ ...")
-    print(f"  See: {os.path.join(args.outdir, 'PREPARACION_DOCKING.md')}\n")
+    print(f"  See: {os.path.join(args.outdir, 'DOCKING_PREPARATION.md')}\n")
 
 
 def cmd_filter(args):

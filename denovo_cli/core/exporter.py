@@ -1,13 +1,13 @@
 """
-exporter.py — Exportar candidatas en SDF 3D y PDBQT para AutoDock Vina.
+exporter.py — Export candidates as 3D SDF and PDBQT for AutoDock Vina.
 
 Pipeline:
-  1. Generar conformación 3D con RDKit (ETKDGv3 + MMFF94)
-  2. Escribir SDF con metadatos (rank, score, ADMET)
-  3. Intentar preparar PDBQT con Meeko (si está instalado)
-     Si Meeko no está disponible, escribir instrucciones de preparación manual.
+  1. Generate a 3D conformer with RDKit (ETKDGv3 + MMFF94)
+  2. Write the SDF with its metadata (rank, score, ADMET)
+  3. Prepare the PDBQT with Meeko when it is installed; when it is not,
+     write out the manual preparation instructions instead.
 
-Referencia:
+References:
   - Eberhardt et al. (2021) J. Chem. Inf. Model. 61, 3891–3898 (AutoDock Vina)
   - Forli et al. (2016) Nature Protocols 11, 905–919
 """
@@ -26,11 +26,11 @@ def export_candidates(
     verbose: bool = True,
 ) -> Dict[str, str]:
     """
-    Exporta las candidatas en SDF y PDBQT.
+    Export the candidates as SDF and PDBQT.
 
     Returns
     -------
-    Dict con rutas: {'sdf': path, 'pdbqt': path_or_None, 'csv': path}
+    Dict of paths: {'sdf': path, 'pdbqt': path_or_None, 'csv': path}
     """
     _log = print if verbose else lambda *a, **k: None
     os.makedirs(outdir, exist_ok=True)
@@ -39,16 +39,16 @@ def export_candidates(
     csv_path  = os.path.join(outdir, f"{prefix}_admet.csv")
     pdbqt_path = None
 
-    # ── SDF con conformaciones 3D ─────────────────────────────────────────────
-    _log(f"[Export] Generando conformaciones 3D y escribiendo SDF...")
+    # ── SDF with 3D conformers ────────────────────────────────────────────────
+    _log(f"[Export] Generating 3D conformers and writing the SDF...")
     n_exported = _write_sdf(candidates, sdf_path, verbose)
-    _log(f"[Export] {n_exported} moléculas escritas en {sdf_path}")
+    _log(f"[Export] {n_exported} molecules written to {sdf_path}")
 
-    # ── CSV con métricas ──────────────────────────────────────────────────────
+    # ── CSV of metrics ────────────────────────────────────────────────────────
     _write_csv(candidates, csv_path)
-    _log(f"[Export] Métricas ADMET escritas en {csv_path}")
+    _log(f"[Export] ADMET metrics written to {csv_path}")
 
-    # ── PDBQT con Meeko (usa SDF con H explícitos) ───────────────────────────
+    # ── PDBQT via Meeko (uses the SDF with explicit hydrogens) ───────────────
     sdf_hs_path = sdf_path[:-4] + "_hs.sdf"
     meeko_ok = _check_meeko()
     if meeko_ok:
@@ -56,9 +56,9 @@ def export_candidates(
         success = _prepare_pdbqt_meeko(sdf_hs_path, pdbqt_path, verbose)
         if not success:
             pdbqt_path = None
-            _log("[Export] PDBQT fallido, continuando sin él.")
+            _log("[Export] PDBQT preparation failed; continuing without it.")
     else:
-        _log("[Export] Meeko no instalado. Instrucciones de preparación manual:")
+        _log("[Export] Meeko not installed. Manual preparation instructions:")
         _log("  pip install meeko")
         _log(f"  mk_prepare_ligand.py -i {sdf_path} -o {os.path.join(outdir, prefix)}.pdbqt")
         _write_prep_instructions(outdir, sdf_path, prefix)
@@ -70,17 +70,17 @@ def export_candidates(
 
 def _write_sdf(candidates: List[Dict], path: str, verbose: bool) -> int:
     """
-    Escribe dos SDF:
-      - path              : sin H explícitos (visualización en PyMOL/VMD)
-      - path_stem_hs.sdf  : con H explícitos (para Meeko/AutoDock Vina)
+    Writes two SDF files:
+      - path              : no explicit hydrogens (viewing in PyMOL/VMD)
+      - path_stem_hs.sdf  : explicit hydrogens (for Meeko/AutoDock Vina)
     """
     from rdkit import Chem
     from rdkit.Chem import AllChem, SDWriter
     _log = print if verbose else lambda *a, **k: None
 
     stem        = path[:-4] if path.endswith(".sdf") else path
-    path_hs     = stem + "_hs.sdf"   # con H — para Meeko
-    writer      = SDWriter(path)      # sin H — para visualización
+    path_hs     = stem + "_hs.sdf"   # with H — for Meeko
+    writer      = SDWriter(path)      # without H — for viewing
     writer_hs   = SDWriter(path_hs)
     exported    = 0
 
@@ -89,7 +89,7 @@ def _write_sdf(candidates: List[Dict], path: str, verbose: bool) -> int:
         if mol is None:
             continue
 
-        # Conformación 3D con H explícitos
+        # 3D conformer with explicit hydrogens
         mol3d = Chem.AddHs(mol)
         params = AllChem.ETKDGv3()
         params.randomSeed = 42 + cand.get("rank", 0)
@@ -97,12 +97,12 @@ def _write_sdf(candidates: List[Dict], path: str, verbose: bool) -> int:
         if status != 0:
             status = AllChem.EmbedMolecule(mol3d, AllChem.ETKDG())
         if status != 0:
-            _log(f"  [!] No se pudo generar 3D para candidata #{cand.get('rank','?')}")
+            _log(f"  [!] Could not generate 3D for candidate #{cand.get('rank','?')}")
             continue
         AllChem.MMFFOptimizeMolecule(mol3d, maxIters=500)
 
         def _set_props(m):
-            m.SetProp("_Name",          f"Candidata_{cand.get('rank', exported+1):03d}")
+            m.SetProp("_Name",          f"Candidate_{cand.get('rank', exported+1):03d}")
             m.SetProp("Rank",           str(cand.get("rank", "")))
             m.SetProp("Score",          f"{cand.get('score', 0):.4f}")
             m.SetProp("Pharma_Score",   f"{cand.get('pharma_score', 0):.4f}")
@@ -116,11 +116,11 @@ def _write_sdf(candidates: List[Dict], path: str, verbose: bool) -> int:
             m.SetProp("Lip_Violations", str(cand.get("lip_violations", "")))
             m.SetProp("SMILES",         cand["smiles"])
 
-        # SDF con H (para Meeko)
+        # SDF with hydrogens (for Meeko)
         _set_props(mol3d)
         writer_hs.write(mol3d)
 
-        # SDF sin H (para visualización)
+        # SDF without hydrogens (for viewing)
         mol3d_noH = Chem.RemoveHs(mol3d)
         _set_props(mol3d_noH)
         writer.write(mol3d_noH)
@@ -148,10 +148,10 @@ def _write_csv(candidates: List[Dict], path: str):
         writer.writerows(candidates)
 
 
-# ── PDBQT con Meeko ───────────────────────────────────────────────────────────
+# ── PDBQT via Meeko ───────────────────────────────────────────────────────────
 
 def _check_meeko() -> bool:
-    """Verifica si Meeko está instalado."""
+    """Is Meeko installed?"""
     try:
         import meeko
         return True
@@ -162,10 +162,10 @@ def _check_meeko() -> bool:
 
 
 def _prepare_pdbqt_meeko(sdf_path: str, pdbqt_path: str, verbose: bool) -> bool:
-    """Prepara PDBQT usando Meeko CLI."""
+    """Prepare the PDBQT with the Meeko CLI."""
     _log = print if verbose else lambda *a, **k: None
 
-    # Intentar el comando mk_prepare_ligand.py (Meeko >= 0.5)
+    # Try the mk_prepare_ligand.py command first (Meeko >= 0.5)
     cmd = None
     if shutil.which("mk_prepare_ligand.py"):
         cmd = ["mk_prepare_ligand.py", "-i", sdf_path, "--multimol_outdir",
@@ -187,7 +187,7 @@ def _prepare_pdbqt_meeko(sdf_path: str, pdbqt_path: str, verbose: bool) -> bool:
 
 
 def _prepare_pdbqt_api(sdf_path: str, pdbqt_path: str, verbose: bool) -> bool:
-    """Prepara PDBQT usando la API Python de Meeko."""
+    """Prepare the PDBQT with Meeko's Python API."""
     _log = print if verbose else lambda *a, **k: None
     try:
         from meeko import MoleculePreparation
@@ -219,35 +219,35 @@ def _prepare_pdbqt_api(sdf_path: str, pdbqt_path: str, verbose: bool) -> bool:
 
 
 def _write_prep_instructions(outdir: str, sdf_path: str, prefix: str):
-    """Escribe un archivo README con instrucciones de preparación manual."""
-    txt = f"""# Preparación de ligandos para AutoDock Vina
-## Requisito: Meeko
+    """Write a README with the manual preparation instructions."""
+    txt = f"""# Preparing ligands for AutoDock Vina
+## Requirement: Meeko
 
     pip install meeko
 
-## Preparar PDBQT desde el SDF generado
+## Prepare the PDBQT from the generated SDF
 
     mk_prepare_ligand.py -i {sdf_path} --multimol_outdir {outdir}/pdbqt/
 
-## Preparar el receptor (proteína)
+## Prepare the receptor
 
-    # 1. Remover agua y ligando del PDB original
-    # 2. Convertir a PDBQT con prepare_receptor
-    prepare_receptor4.py -r proteina.pdb -o proteina.pdbqt
+    # 1. Strip water and the ligand from the original PDB
+    # 2. Convert to PDBQT with prepare_receptor
+    prepare_receptor4.py -r protein.pdb -o protein.pdbqt
 
-## Correr AutoDock Vina
+## Run AutoDock Vina
 
-    vina --receptor proteina.pdbqt \\
+    vina --receptor protein.pdbqt \\
          --ligands {outdir}/pdbqt/ \\
          --center_x X --center_y Y --center_z Z \\
          --size_x 25 --size_y 25 --size_z 25 \\
          --exhaustiveness 16 \\
-         --out resultados_docking.pdbqt
+         --out docking_results.pdbqt
 
-## Notas
-- Ajustar las coordenadas del centro (X, Y, Z) al sitio activo de tu proteína.
-- Aumentar --exhaustiveness para mayor precisión (default 8, recomendado 16-32).
+## Notes
+- Set the centre coordinates (X, Y, Z) to your protein's active site.
+- Raise --exhaustiveness for more precision (default 8, 16-32 recommended).
 """
-    readme_path = os.path.join(outdir, "PREPARACION_DOCKING.md")
+    readme_path = os.path.join(outdir, "DOCKING_PREPARATION.md")
     with open(readme_path, "w") as f:
         f.write(txt)
