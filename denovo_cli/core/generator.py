@@ -76,12 +76,23 @@ def generate_molecules(
         if mol:
             fp_seeds.append(AllChem.GetMorganFingerprintAsBitVect(mol, 2, 2048))
 
+    # Un SMILES puntúa siempre igual, y el GA vuelve a ver los mismos elitistas
+    # generación tras generación: sin caché, compute_admet y el SA Score se
+    # recalculaban para cada élite en cada generación.
+    score_cache: Dict[str, float] = {}
+
     def _score(smi: str) -> float:
+        if smi in score_cache:
+            return score_cache[smi]
+        score_cache[smi] = value = _score_uncached(smi)
+        return value
+
+    def _score_uncached(smi: str) -> float:
         try:
             mol = Chem.MolFromSmiles(smi)
             if mol is None:
                 return 0.0
-            admet = compute_admet(mol)
+            admet = compute_admet(mol, active_filters)
             if not admet.get("passes"):
                 return 0.0
             ps  = pharmacophore_score(mol, reference_profile)
@@ -156,11 +167,10 @@ def generate_molecules(
     history    = []
 
     for gen in range(params["n_gen"]):
-        scored = sorted(
-            [(s, sel2smi(s)) for s in population],
-            key=lambda x: -_score(x[1]) if x[1] else 0.0
-        )
-        scored = [(sel, smi, _score(smi)) for sel, smi in scored if smi]
+        scored = [(sel, smi, _score(smi))
+                  for sel, smi in ((s, sel2smi(s)) for s in population)
+                  if smi]
+        scored.sort(key=lambda x: -x[2])
 
         if scored:
             best_gen = scored[0][2]
@@ -205,7 +215,7 @@ def generate_molecules(
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
             continue
-        admet = compute_admet(mol)
+        admet = compute_admet(mol, active_filters)
         if not admet.get("passes"):
             continue
         ps = pharmacophore_score(mol, reference_profile)
@@ -217,7 +227,9 @@ def generate_molecules(
             "pharma_score" : round(ps, 3),
             "score"        : round(sc, 3),
             "passes"       : True,   # ya filtrado por ADMET arriba
-            **{k: v for k, v in admet.items() if k not in ("passes", "error", "alerts")},
+            **{k: v for k, v in admet.items()
+               if k not in ("passes", "error", "alerts", "alerts_info")},
+            "alerts_info"  : "; ".join(admet.get("alerts_info") or []),
         })
 
     candidates.sort(key=lambda x: -x["score"])
